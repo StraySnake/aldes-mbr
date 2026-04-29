@@ -12,7 +12,10 @@
 
 services:
   aldes-mqtt-bridge:
-    build: .
+    # Use the published image (recommended)
+    image: ghcr.io/djo1338/aldes-mqtt-bridge:latest
+    # Or build from source instead:
+    # build: .
     container_name: aldes-mqtt-bridge
     restart: unless-stopped
     network_mode: host   # required to see real client IP for the box

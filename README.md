@@ -3,6 +3,7 @@
 > Local control of Aldes Connect ventilation units (VMC / HRV) via Home Assistant — bypassing the unreliable Aldes cloud.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/ghcr.io-aldes--mqtt--bridge-blue?logo=docker)](https://github.com/djo1338/aldes-mqtt-bridge/pkgs/container/aldes-mqtt-bridge)
 
 If you own an **Aldes Dee Fly Cube** (or possibly InspirAir Home / T.Flow / T.One — same Azure backend) with a Connect Box, you have probably noticed:
 
