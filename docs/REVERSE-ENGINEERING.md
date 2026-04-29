@@ -30,7 +30,7 @@ So: **Aldes' problem is in their cloud's C2D delivery, not in our auth or in HA*
 
 ## Step 2 — Locate the box's outbound traffic
 
-The box only has WiFi, so we couldn't tap it physically. We used **ARP spoofing** with [scapy](https://scapy.net/) to make our PC pretend to be the LAN gateway, then sniffed in promisc mode — see [`tools/arp_sniff.py`](https://github.com/<you>/aldes-mqtt-bridge/blob/main/tools/arp_sniff.py) (in the original project repo, not shipped here).
+The box only has WiFi, so we couldn't tap it physically. We used **ARP spoofing** with [scapy](https://scapy.net/) to make our PC pretend to be the LAN gateway, then sniffed in promisc mode (script not shipped here — kept in the private workspace).
 
 After ~2 min the box revealed:
 

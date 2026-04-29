@@ -42,7 +42,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 1. **Clone this repo on your Docker host**
    ```bash
-   git clone https://github.com/<you>/aldes-mqtt-bridge.git
+   git clone https://github.com/djo1338/aldes-mqtt-bridge.git
    cd aldes-mqtt-bridge
    cp docker-compose.yml.example docker-compose.yml
    ```
