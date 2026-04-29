@@ -1,0 +1,40 @@
+# Sample Home Assistant automations — append to /config/automations.yaml
+# (or paste in the Automations editor)
+#
+# After saving: Developer Tools → YAML → Reload Automations (no full HA restart needed)
+#
+# Cycle:
+#   20:00  → Holiday mode (low speed, quiet at night)
+#   08:00  → Daily mode (normal speed)
+
+- id: vmc_evening_holiday
+  alias: VMC - Holiday at 8 PM
+  description: Switch the VMC to holiday/low mode every evening
+  triggers:
+    - trigger: time
+      at: '20:00:00'
+  conditions: []
+  actions:
+    - action: select.select_option
+      target:
+        entity_id: select.aldes_vmc_dee_fly_cube_mode
+      data:
+        # Use the friendly French label exposed by the broker.
+        # Other valid options: "Quotidien", "Invités", "Boost"
+        option: Vacances
+  mode: single
+
+- id: vmc_morning_daily
+  alias: VMC - Daily at 8 AM
+  description: Switch the VMC back to daily mode every morning
+  triggers:
+    - trigger: time
+      at: '08:00:00'
+  conditions: []
+  actions:
+    - action: select.select_option
+      target:
+        entity_id: select.aldes_vmc_dee_fly_cube_mode
+      data:
+        option: Quotidien
+  mode: single

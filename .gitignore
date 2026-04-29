@@ -1,0 +1,24 @@
+# Local config — never commit
+docker-compose.yml
+.env
+
+# Generated cert / logs
+data/
+logs/
+*.pem
+*.crt
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

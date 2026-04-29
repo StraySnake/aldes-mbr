@@ -1,0 +1,42 @@
+# Copy this file to docker-compose.yml and adjust for your setup.
+#
+# Pre-requisites:
+#   - Pi-hole (or any DNS) configured to rewrite:
+#       aldesiotsuite.azure-devices.net -> <this host's IP>
+#   - An MQTT broker (Mosquitto) reachable for republishing telemetry
+#   - The Connect Box already paired on your WiFi
+#
+# DEVICE_MAC is REQUIRED. Find it via:
+#   nslookup HF-LPB100      (if box on local DNS)
+#   arp -a                  (look for prefix 28:9C:6E)
+
+services:
+  aldes-mqtt-bridge:
+    build: .
+    container_name: aldes-mqtt-bridge
+    restart: unless-stopped
+    network_mode: host   # required to see real client IP for the box
+    volumes:
+      - ./data:/data     # persists self-signed cert
+      - ./logs:/logs
+    environment:
+      # === REQUIRED ===
+      DEVICE_MAC: "AA:BB:CC:DD:EE:FF"
+
+      # === Upstream Mosquitto (where telemetry is republished) ===
+      UPSTREAM_MQTT_HOST: "127.0.0.1"
+      UPSTREAM_MQTT_PORT: "1883"
+      # UPSTREAM_MQTT_USER: ""
+      # UPSTREAM_MQTT_PASS: ""
+
+      # === Branding ===
+      DEVICE_NAME: "Aldes VMC"
+      DEVICE_MODEL: "Dee Fly Cube"
+
+      # === Topic prefix ===
+      BRIDGE_TOPIC_PREFIX: "aldes/vmc"
+
+      # === Home Assistant MQTT discovery prefix ===
+      HA_DISCOVERY_PREFIX: "homeassistant"
+
+      LOG_FILE: "/logs/mitm.log"

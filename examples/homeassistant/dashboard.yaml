@@ -1,0 +1,59 @@
+# Sample Lovelace block — paste under any view/section in your dashboard.
+# Auto-discovery from the broker creates these entities:
+#   select.<DEVICE_NAME_slug>_mode
+#   sensor.<DEVICE_NAME_slug>_air_interieur_extrait
+#   sensor.<DEVICE_NAME_slug>_air_exterieur
+#   sensor.<DEVICE_NAME_slug>_air_rejete
+#   sensor.<DEVICE_NAME_slug>_debit_extraction
+#   sensor.<DEVICE_NAME_slug>_vitesse_demandee
+#   sensor.<DEVICE_NAME_slug>_puissance_echangeur
+#
+# If you used the default DEVICE_NAME ("Aldes VMC") and DEVICE_MODEL ("Dee Fly Cube"),
+# slugs are: aldes_vmc_dee_fly_cube_*
+#
+# Adjust entity prefixes below if your slug is different.
+
+- type: heading
+  heading: Ventilation
+  heading_style: title
+  icon: mdi:fan-clock
+
+- type: grid
+  columns: 1
+  square: false
+  grid_options:
+    columns: 6
+    rows: auto
+  cards:
+    - type: tile
+      entity: select.aldes_vmc_dee_fly_cube_mode
+      name: Mode
+      icon: mdi:fan-clock
+      vertical: false
+      features:
+        - type: select-options
+      features_position: bottom
+
+    - type: tile
+      entity: sensor.aldes_vmc_dee_fly_cube_air_interieur_extrait
+      name: Indoor
+
+    - type: tile
+      entity: sensor.aldes_vmc_dee_fly_cube_air_exterieur
+      name: Outdoor
+
+    - type: tile
+      entity: sensor.aldes_vmc_dee_fly_cube_air_rejete
+      name: Reject
+
+    - type: tile
+      entity: sensor.aldes_vmc_dee_fly_cube_debit_extraction
+      name: Flow
+
+    - type: tile
+      entity: sensor.aldes_vmc_dee_fly_cube_vitesse_demandee
+      name: Set speed
+
+    - type: tile
+      entity: sensor.aldes_vmc_dee_fly_cube_puissance_echangeur
+      name: Exchanger
