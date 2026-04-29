@@ -49,10 +49,17 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 2. **Edit `docker-compose.yml`**: set `DEVICE_MAC` and `UPSTREAM_MQTT_HOST` (your Mosquitto IP).
 
-3. **Configure DNS rewrite** in Pi-hole (Settings → Local DNS Records, or via TOML):
+3. **Configure DNS rewrites** in Pi-hole (`/etc/pihole/pihole.toml`, key `dns.hosts`, requires Pi-hole v6+):
+   ```toml
+   [dns]
+   hosts = [
+     "<docker-host-IP> aldesiotsuite.azure-devices.net",
+     "0.0.0.0 aldes.blob.core.windows.net"
+   ]
    ```
-   aldesiotsuite.azure-devices.net  →  <docker-host-IP>
-   ```
+   Then `pihole reloaddns`.
+
+   The first line redirects the MQTT/IoT Hub traffic to our broker. The second line **blocks Aldes firmware updates** by sinkholing the Azure Blob endpoint where the OTA blobs are hosted. This protects you from a future firmware push that could add cert pinning, change the hostname, or otherwise break this bridge. To re-allow updates later, just remove the line.
 
 4. **Start the broker**
    ```bash
