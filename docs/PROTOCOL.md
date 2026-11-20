@@ -176,4 +176,4 @@ In practice the box accepts payloads without `id` and `jsonrpc` fields too. We s
 
 When the box's MQTT connection to Azure drops (every few minutes, especially on weak 2.4 GHz signal), any C2D commands queued at Azure are lost — Azure IoT Hub's default C2D message TTL is 1 hour but the **delivery only happens while the device is connected**. If the box reconnects every 30s but the auth fails 5 times out of 6 (Aldes' SAS-key minting endpoint returns 503 frequently), the C2D queue piles up and the box never sees the command.
 
-By being the broker ourselves, we don't have this problem: when we receive a command from HA, we send it on the box's currently-active MQTT session and PUBACK back to HA after the box ACKs.
+By being the broker ourselves, we don't have this problem: when we receive a command from HA, we send it immediately on the box's currently-active MQTT session (QoS 0: the box does not acknowledge it, so delivery is not confirmed — check the next telemetry frame's `current_mode`).

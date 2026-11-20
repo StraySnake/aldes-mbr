@@ -18,6 +18,12 @@ services:
     # build: .
     container_name: aldes-mqtt-bridge
     restart: unless-stopped
+    init: true           # forwards SIGTERM properly -> fast, clean `docker compose stop`
+    logging:             # cap Docker's own log (the broker logs every telemetry frame)
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     network_mode: host   # required to see real client IP for the box
     volumes:
       - ./data:/data     # persists self-signed cert
@@ -43,3 +49,5 @@ services:
       HA_DISCOVERY_PREFIX: "homeassistant"
 
       LOG_FILE: "/logs/mitm.log"
+      # LOG_MAX_BYTES: "5242880"   # rotate mitm.log above 5 MB (0 = never)
+      # LOG_BACKUPS: "3"

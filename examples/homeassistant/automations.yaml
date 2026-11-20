@@ -1,6 +1,8 @@
 # Sample Home Assistant automations — append to /config/automations.yaml
 # (or paste in the Automations editor)
 #
+# Entity IDs assume the default DEVICE_NAME ("Aldes VMC") -> select.aldes_vmc_mode.
+#
 # After saving: Developer Tools → YAML → Reload Automations (no full HA restart needed)
 #
 # Cycle:
@@ -17,10 +19,10 @@
   actions:
     - action: select.select_option
       target:
-        entity_id: select.aldes_vmc_dee_fly_cube_mode
+        entity_id: select.aldes_vmc_mode
       data:
         # Use the friendly French label exposed by the broker.
-        # Other valid options: "Quotidien", "Invités", "Boost"
+        # Other valid options: "Quotidien", "Invités", "Boost", "Programme"
         option: Vacances
   mode: single
 
@@ -34,7 +36,7 @@
   actions:
     - action: select.select_option
       target:
-        entity_id: select.aldes_vmc_dee_fly_cube_mode
+        entity_id: select.aldes_vmc_mode
       data:
         option: Quotidien
   mode: single
