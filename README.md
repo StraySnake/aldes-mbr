@@ -122,6 +122,15 @@ The box cannot be authenticated: its SAS token is signed with an Aldes key we do
 - **`DEVICE_IP` (optional, recommended)**: connections from any other IP are closed immediately. Without it, a device on your LAN that knows the box's MAC (visible in any ARP table) can connect with its client_id, take over the session and receive your commands instead of the box. Reserve the box's IP in your DHCP server before setting it, otherwise the bridge stops accepting the box when its IP changes (look for `REFUSED` in the logs). A firewall rule on the host restricting port 8883 to the box's IP gives the same protection.
 - Commands only come from your Mosquitto: protect it with a username/password, otherwise any LAN device can publish on `aldes/vmc/cmd/...` and control the VMC directly.
 
+## Operations
+
+- **Logs**: `LOG_LEVEL=info` (default) logs connections, commands and the first telemetry frame of each connection. `LOG_LEVEL=debug` logs every frame with its payload, as older versions did; `warning` only problems. `mitm.log` rotates at 5 MB (`LOG_MAX_BYTES`, `LOG_BACKUPS`).
+- **Docker image**: the bridge runs as the unprivileged user `aldes` (uid 1000). The entrypoint starts as root only to take ownership of `/data` and `/logs`, so a `data/` folder created by an older image keeps working. If that is refused (e.g. on a network share), it runs as root and logs a warning. You can also set `user:` in `docker-compose.yml`; the volumes must then be writable by that user.
+- **Health check**: the container is *healthy* while the broker loop runs and Mosquitto is connected (`docker ps` shows the status). An offline box does not make it unhealthy: that is what HA's availability is for.
+- **TLS with the box**: the broker offers every cipher suite (`ALL:@SECLEVEL=0`) because the HF-LPB100 firmware only speaks legacy TLS. Each connection logs the negotiated version and suite; you can then restrict `TLS_CIPHERS` to it.
+- **TLS to Mosquitto**: `UPSTREAM_MQTT_TLS=1`, with `UPSTREAM_MQTT_CA` for a private CA, or `UPSTREAM_MQTT_TLS_INSECURE=1` to accept any certificate.
+- Invalid settings (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an explicit message.
+
 ## Development
 
 ```bash

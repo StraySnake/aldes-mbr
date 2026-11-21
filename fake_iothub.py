@@ -30,6 +30,16 @@ Env vars:
                          unavailable (default: 900, 0 = never)
   CMD_CONFIRM_TIMEOUT    seconds to wait for a telemetry frame confirming a mode change
                          (default: 900)
+  LOG_LEVEL              debug | info | warning (default: info). "info" logs connections,
+                         commands and the first telemetry frame of each connection;
+                         "debug" logs every frame with its payload.
+  TLS_CIPHERS            OpenSSL cipher string offered to the box (default: ALL:@SECLEVEL=0).
+                         The suite the box negotiates is logged at each connection.
+  UPSTREAM_MQTT_TLS      1 = connect to Mosquitto over TLS (default: 0)
+  UPSTREAM_MQTT_CA       CA file to verify Mosquitto's certificate (default: system CAs)
+  UPSTREAM_MQTT_TLS_INSECURE  1 = do not verify Mosquitto's certificate (self-signed)
+  HEALTH_FILE            status file read by the Docker HEALTHCHECK (default:
+                         /tmp/aldes-bridge.health)
   LOG_MAX_BYTES          rotate LOG_FILE above this size (default: 5 MB, 0 = no rotation)
   LOG_BACKUPS            number of rotated log files kept (default: 3)
 """
@@ -39,6 +49,32 @@ from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+
+# ---------- configuration ----------
+
+def _env_num(name, default, cast=int, minimum=None):
+    """Numeric env var, with a clear message instead of a traceback when it is invalid."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        sys.exit(f"FATAL: {name} must be {'an integer' if cast is int else 'a number'}, got {raw!r}")
+    if minimum is not None and value < minimum:
+        sys.exit(f"FATAL: {name} must be >= {minimum}, got {raw!r}")
+    return value
+
+
+def _env_bool(name):
+    raw = os.getenv(name, "").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    sys.exit(f"FATAL: {name} must be 0 or 1, got {raw!r}")
+
+
 CERT_DIR = Path(os.getenv("CERT_DIR", "/data"))
 CERT_DIR.mkdir(parents=True, exist_ok=True)
 CERT_FILE = CERT_DIR / "fake_azure.crt"
@@ -46,18 +82,27 @@ KEY_FILE = CERT_DIR / "fake_azure.key"
 SERVER_CN = "aldesiotsuite.azure-devices.net"
 
 UPSTREAM_HOST = os.getenv("UPSTREAM_MQTT_HOST", "127.0.0.1")
-UPSTREAM_PORT = int(os.getenv("UPSTREAM_MQTT_PORT", "1883"))
+UPSTREAM_PORT = _env_num("UPSTREAM_MQTT_PORT", 1883, minimum=1)
 UPSTREAM_USER = os.getenv("UPSTREAM_MQTT_USER", "") or None
 UPSTREAM_PASS = os.getenv("UPSTREAM_MQTT_PASS", "") or None
+UPSTREAM_TLS = _env_bool("UPSTREAM_MQTT_TLS")
+UPSTREAM_CA = os.getenv("UPSTREAM_MQTT_CA", "") or None
+UPSTREAM_TLS_INSECURE = _env_bool("UPSTREAM_MQTT_TLS_INSECURE")
 PREFIX = os.getenv("BRIDGE_TOPIC_PREFIX", "aldes/vmc")
 LOG_FILE = os.getenv("LOG_FILE", "/logs/mitm.log")
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
-LOG_BACKUPS = int(os.getenv("LOG_BACKUPS", "3"))
-SENSOR_EXPIRE_AFTER = int(os.getenv("SENSOR_EXPIRE_AFTER", "900"))
-CMD_CONFIRM_TIMEOUT = float(os.getenv("CMD_CONFIRM_TIMEOUT", "900"))
+LOG_MAX_BYTES = _env_num("LOG_MAX_BYTES", 5 * 1024 * 1024, minimum=0)
+LOG_BACKUPS = _env_num("LOG_BACKUPS", 3, minimum=0)
+LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30}
+LOG_LEVEL = os.getenv("LOG_LEVEL", "info").strip().lower() or "info"
+if LOG_LEVEL not in LOG_LEVELS:
+    sys.exit(f"FATAL: LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {LOG_LEVEL!r}")
+TLS_CIPHERS = os.getenv("TLS_CIPHERS", "").strip() or "ALL:@SECLEVEL=0"
+HEALTH_FILE = Path(os.getenv("HEALTH_FILE", "/tmp/aldes-bridge.health"))
+SENSOR_EXPIRE_AFTER = _env_num("SENSOR_EXPIRE_AFTER", 900, minimum=0)
+CMD_CONFIRM_TIMEOUT = _env_num("CMD_CONFIRM_TIMEOUT", 900.0, cast=float, minimum=1)
 # Frames received this soon after a command may have been sampled before the box
 # applied it: they neither confirm nor refute it.
-CMD_CONFIRM_GRACE = float(os.getenv("CMD_CONFIRM_GRACE", "3"))
+CMD_CONFIRM_GRACE = _env_num("CMD_CONFIRM_GRACE", 3.0, cast=float, minimum=0)
 
 # Device identity — DEVICE_MAC is REQUIRED
 _DEVICE_MAC_RAW = os.getenv("DEVICE_MAC", "").upper().replace(":", "").replace("-", "")
@@ -103,7 +148,7 @@ CMD_RESULT_TOPIC = f"{PREFIX}/command_result"
 BOX_EVENTS = f"devices/{DEVICE_ID}/messages/events/"
 
 HOST = "0.0.0.0"
-PORT = int(os.getenv("LISTEN_PORT", "8883"))  # the box always uses 8883; override for tests
+PORT = _env_num("LISTEN_PORT", 8883, minimum=1)  # the box always uses 8883; override for tests
 
 # Timeouts (seconds)
 HANDSHAKE_TIMEOUT = 30      # TLS handshake + first CONNECT packet
@@ -127,8 +172,11 @@ except Exception:
     pass
 
 
-def log(msg):
-    line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
+def log(msg, level="info"):
+    if LOG_LEVELS[level] < LOG_LEVELS[LOG_LEVEL]:
+        return
+    prefix = "" if level == "info" else f"{level.upper()} "
+    line = f"[{datetime.now().isoformat(timespec='seconds')}] {prefix}{msg}"
     with _log_lock:
         print(line, flush=True)
         if _log_handler:
@@ -274,6 +322,7 @@ class Session:
         self.addr = addr
         self.client_id = None
         self.subs = []
+        self.frames = 0  # PUBLISHes received on this connection
         self.owner = threading.get_ident()
         self._outbox = deque()
 
@@ -357,6 +406,14 @@ class UpstreamBridge:
         )
         if UPSTREAM_USER:
             self.client.username_pw_set(UPSTREAM_USER, UPSTREAM_PASS)
+        if UPSTREAM_TLS:
+            if UPSTREAM_TLS_INSECURE:
+                # tls_insecure_set() alone only skips the hostname check: a self-signed
+                # certificate would still be rejected.
+                self.client.tls_set(cert_reqs=ssl.CERT_NONE)
+                self.client.tls_insecure_set(True)
+            else:
+                self.client.tls_set(ca_certs=UPSTREAM_CA)
         self.client.will_set(STATUS_TOPIC, "offline", qos=1, retain=True)
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
         self.client.on_connect = self._on_connect
@@ -370,7 +427,8 @@ class UpstreamBridge:
         # comes up even if Mosquitto starts after us (e.g. NAS boot).
         self.client.connect_async(UPSTREAM_HOST, UPSTREAM_PORT, keepalive=60)
         self.client.loop_start()
-        log(f"upstream MQTT connecting to {UPSTREAM_HOST}:{UPSTREAM_PORT}...")
+        log(f"upstream MQTT connecting to {UPSTREAM_HOST}:{UPSTREAM_PORT}"
+            f"{' (TLS' + (', certificate NOT verified' if UPSTREAM_TLS_INSECURE else '') + ')' if UPSTREAM_TLS else ''}...")
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code.is_failure:
@@ -643,7 +701,7 @@ def send_publish_to_box(client_id, topic, payload):
     pkt = bytes([0x30]) + encode_remaining_length(len(body)) + body
     try:
         sess.send(pkt)  # queued, written by the session's own thread
-        log(f"inject: queued for {client_id} topic={topic} ({len(payload)} bytes)")
+        log(f"inject: queued for {client_id} topic={topic} ({len(payload)} bytes)", "debug")
         return True
     except Exception as e:
         log(f"inject err: {e}")
@@ -670,6 +728,8 @@ def handle_client(raw_sock, addr):
         raw_sock.settimeout(HANDSHAKE_TIMEOUT)
         tls_sock = ctx.wrap_socket(raw_sock, server_side=True, do_handshake_on_connect=False)
         tls_sock.do_handshake()
+        cipher = tls_sock.cipher()
+        log(f"{addr} TLS {tls_sock.version()} {cipher[0] if cipher else '?'}")
         sess = Session(tls_sock, addr)
         idle_timeout = HANDSHAKE_TIMEOUT  # until CONNECT, then 1.5x keepalive
         last_rx = time.monotonic()
@@ -759,8 +819,12 @@ def handle_client(raw_sock, addr):
                     pkt_id = struct.unpack_from(">H", payload, off)[0]; off += 2
                 msg = payload[off:]
                 preview = msg[:300]
-                log(f"{addr} PUBLISH qos={qos} topic={topic} ({len(msg)}b)")
-                log(f"{addr}   payload = {preview!r}{'...' if len(msg)>300 else ''}")
+                # The first frame of a connection is logged at info level (shows the box works),
+                # the following ones only at debug level (one every 1-5 min, forever).
+                lvl = "debug" if sess.frames else "info"
+                sess.frames += 1
+                log(f"{addr} PUBLISH qos={qos} topic={topic} ({len(msg)}b)", lvl)
+                log(f"{addr}   payload = {preview!r}{'...' if len(msg)>300 else ''}", lvl)
                 if qos == 1 and pkt_id is not None:
                     sess.send(bytes([0x40, 0x02]) + struct.pack(">H", pkt_id))
                 elif qos == 2 and pkt_id is not None:
@@ -1048,9 +1112,9 @@ def _build_ssl_context():
     except (AttributeError, ValueError):
         pass
     try:
-        c.set_ciphers("ALL:@SECLEVEL=0")
+        c.set_ciphers(TLS_CIPHERS)
     except ssl.SSLError as e:
-        log(f"set_ciphers err: {e}")
+        sys.exit(f"FATAL: TLS_CIPHERS {TLS_CIPHERS!r} rejected by OpenSSL: {e}")
     return c
 
 
@@ -1068,6 +1132,21 @@ def _ip_allowed(ip):
         log(f"connection from {ip} REFUSED: not in DEVICE_IP ({', '.join(sorted(ALLOWED_IPS))})"
             f" (logged at most once a minute per IP)")
     return False
+
+
+def _health_loop():
+    """Write the status read by healthcheck.py (Docker HEALTHCHECK) every 10 s.
+    Healthy = the main loop is alive and Mosquitto is connected. The box being
+    offline is not a container problem: it is reported by HA's availability."""
+    while True:
+        ok = bridge is not None and bridge.client.is_connected()
+        try:
+            tmp = HEALTH_FILE.with_suffix(".tmp")
+            tmp.write_text("ok\n" if ok else "upstream MQTT not connected\n")
+            tmp.replace(HEALTH_FILE)
+        except OSError:
+            pass
+        time.sleep(10)
 
 
 def _on_sigterm(signum, frame):
@@ -1094,6 +1173,9 @@ def main():
     log(f"fake Azure IoT Hub listening on {HOST}:{PORT} (TLS, CN={SERVER_CN})")
     log(f"bridging captured PUBLISHes to mqtt://{UPSTREAM_HOST}:{UPSTREAM_PORT} prefix={PREFIX}")
     log(f"expecting box client_id={DEVICE_ID}")
+    log(f"log level {LOG_LEVEL}" + ("" if LOG_LEVEL == "debug" else
+                                     " (set LOG_LEVEL=debug to log every telemetry frame)"))
+    threading.Thread(target=_health_loop, daemon=True).start()
     if ALLOWED_IPS:
         log(f"accepting connections only from {', '.join(sorted(ALLOWED_IPS))}")
     else:
