@@ -3,7 +3,7 @@
 > Local control of Aldes Connect ventilation units (VMC / HRV) via Home Assistant — bypassing the unreliable Aldes cloud.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/ghcr.io-aldes--mqtt--bridge-blue?logo=docker)](https://github.com/djo1338/aldes-mqtt-bridge/pkgs/container/aldes-mqtt-bridge)
+[![Docker](https://img.shields.io/badge/ghcr.io-aldes--mbr-blue?logo=docker)](https://github.com/StraySnake/aldes-mbr/pkgs/container/aldes-mbr)
 
 If you own an **Aldes Dee Fly Cube** (or possibly InspirAir Home / T.Flow / T.One — same Azure backend) with a Connect Box, you have probably noticed:
 
@@ -43,10 +43,12 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 1. **Clone this repo on your Docker host**
    ```bash
-   git clone https://github.com/djo1338/aldes-mqtt-bridge.git
-   cd aldes-mqtt-bridge
+   git clone https://github.com/StraySnake/aldes-mbr.git
+   cd aldes-mbr
    cp docker-compose.yml.example docker-compose.yml
    ```
+
+   **Coming from djo1338/aldes-mqtt-bridge?** Stop the old container first, from its own folder: `docker compose down` (or `docker rm -f aldes-mqtt-bridge`). Both use port 8883 and the same container name. Copy your settings (`DEVICE_MAC`, `UPSTREAM_MQTT_*`, `DEVICE_NAME`) into the new `docker-compose.yml`, and keep `build: .`: the old `image: ghcr.io/djo1338/...` line would run the old code. Home Assistant keeps the same entities.
 
 2. **Edit `docker-compose.yml`**: set `DEVICE_MAC` and `UPSTREAM_MQTT_HOST` (your Mosquitto IP). Recommended: reserve the box's IP in your DHCP server and set `DEVICE_IP` to it (see [Security](#security)).
 
@@ -67,6 +69,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    docker compose up -d --build
    docker compose logs -f
    ```
+   The first lines show the version you run: `HA discovery: 19 sensors + 1 select + 9 buttons`.
 
 5. **Wait for the box to reconnect** (1–5 min, or power-cycle it). You should see in the logs:
    ```
