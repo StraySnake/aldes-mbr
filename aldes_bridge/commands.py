@@ -20,14 +20,22 @@ CMD_STATUS_LABELS = {
     "failed": "Échec",
     "unconfirmed": "Non confirmée",
     "sent": "Envoyée",
+    "received": "Reçue par la box",
     "not_connected": "Box déconnectée",
 }
 _HOLIDAY_STOP = "W" + "00010101000000Z" * 2
 
 
+def is_mode_change(payload):
+    try:
+        return json.loads(payload).get("method") == "changeMode"
+    except (ValueError, AttributeError):
+        return False
+
+
 def expected_mode(payload):
     """What current_mode should become after this command: ("is", code), ("not", code),
-    or None when the telemetry cannot tell (Programme, changeCMO, unknown payloads)."""
+    or None when the telemetry cannot tell (changeCMO, unknown payloads)."""
     try:
         cmd = json.loads(payload)
         param = cmd["params"][0]
@@ -38,19 +46,25 @@ def expected_mode(payload):
     if param == _HOLIDAY_STOP:
         return ("not", "W")
     code = param[0]
-    if code not in MODES or code == "Z":
-        # Z: in Programme mode the box may report the scheduled mode, not "Z" (unverified).
+    if code not in MODES:
         return None
+    # Z (Programme) included: a real box reports current_mode "Z", not the scheduled mode.
     return ("is", code)
 
 
 class CommandTracker:
-    """Follows the last command sent to the box until the telemetry confirms it.
-    One retry if a frame shows the old mode; a newer command replaces the pending one."""
+    """Follows the last command sent to the box.
+
+    1. "pending" (mode change) or "sent" (cannot be checked by the telemetry).
+    2. "received" when the box acknowledges it (PUBACK, commands sent with QoS 1).
+    3. For mode changes, the next frame carrying current_mode (after CMD_CONFIRM_GRACE)
+       confirms it, or triggers one resend; a second mismatch is a failure.
+    A newer command replaces the previous one.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._pending = None
+        self._last = None  # dict describing the last command sent
 
     def _publish(self, info, status, reported=None):
         result = {
@@ -67,30 +81,45 @@ class CommandTracker:
     def not_connected(self, label):
         self._publish({"label": label}, "not_connected")
 
-    def sent(self, label, topic, payload):
+    def sent(self, label, topic, payload, pkt_id=0):
         expect = expected_mode(payload)
+        info = {
+            "label": label, "topic": topic, "payload": payload, "pkt_id": pkt_id,
+            "expect": expect, "expected": None if expect is None else ("!" if expect[0] == "not" else "") + expect[1],
+            "is_mode_change": is_mode_change(payload),
+            "sent_at": time.monotonic(), "retried": False, "acked": False, "done": False, "observed": False,
+            "status": "pending" if expect else "sent", "timer": None,
+        }
         with self._lock:
-            if self._pending:
-                self._pending["timer"].cancel()
-                self._pending = None
-            if expect is None:
-                info = {"label": label}
-            else:
-                info = self._pending = {
-                    "label": label, "topic": topic, "payload": payload,
-                    "expect": expect, "expected": ("!" if expect[0] == "not" else "") + expect[1],
-                    "sent_at": time.monotonic(), "retried": False,
-                }
+            if self._last and self._last["timer"]:
+                self._last["timer"].cancel()
+            self._last = info
+            if expect:
                 info["timer"] = threading.Timer(CMD_CONFIRM_TIMEOUT, self._timeout, args=(info,))
                 info["timer"].daemon = True
                 info["timer"].start()
-        self._publish(info, "pending" if expect else "sent")
+        self._publish(info, info["status"])
+
+    def on_puback(self, pkt_id):
+        """The box acknowledged a PUBLISH. True if it was the last command."""
+        with self._lock:
+            info = self._last
+            if not info or not pkt_id or info["pkt_id"] != pkt_id or info["acked"]:
+                return False
+            info["acked"] = True
+            if info["done"] or info["retried"]:
+                # Keep the outcome, or "retrying": "received" would look like a step back.
+                log(f"command '{info['label']}': resend acknowledged by the box", "debug")
+                return True
+            info["status"] = "received"
+        self._publish(info, "received")
+        return True
 
     def _timeout(self, info):
         with self._lock:
-            if self._pending is not info:
+            if self._last is not info or info["done"]:
                 return
-            self._pending = None
+            info["done"] = True
         self._publish(info, "unconfirmed")
 
     def on_frame(self, frame):
@@ -98,25 +127,37 @@ class CommandTracker:
         if not isinstance(mode, str) or not mode:
             return  # boot heartbeat: says nothing about the mode
         with self._lock:
-            p = self._pending
-            if p is None or time.monotonic() - p["sent_at"] < CMD_CONFIRM_GRACE:
+            p = self._last
+            if p is None or p["done"] or time.monotonic() - p["sent_at"] < CMD_CONFIRM_GRACE:
                 return
-            kind, code = p["expect"]
-            ok = (mode[0] == code) if kind == "is" else (mode[0] != code)
-            if ok or p["retried"]:
-                p["timer"].cancel()
-                self._pending = None
-                status = "confirmed" if ok else "failed"
+            if p["expect"] is None:
+                # Not verifiable (Programme): still record what the box reports, once.
+                if not p["is_mode_change"] or p["observed"]:
+                    return
+                p["observed"] = True
+                status = p["status"]
             else:
-                p["retried"] = True
-                p["sent_at"] = time.monotonic()
-                status = "retrying"
-        if status == "retrying" and not send_publish_to_box(DEVICE_ID, p["topic"], p["payload"]):
-            status = "failed"
-            with self._lock:
-                if self._pending is p:
+                kind, code = p["expect"]
+                ok = (mode[0] == code) if kind == "is" else (mode[0] != code)
+                if ok or p["retried"]:
                     p["timer"].cancel()
-                    self._pending = None
+                    p["done"] = True
+                    status = "confirmed" if ok else "failed"
+                else:
+                    p["retried"] = True
+                    p["acked"] = False
+                    p["sent_at"] = time.monotonic()
+                    status = "retrying"
+        if status == "retrying":
+            pkt_id = send_publish_to_box(DEVICE_ID, p["topic"], p["payload"])
+            if pkt_id is None:
+                status = "failed"
+                with self._lock:
+                    p["timer"].cancel()
+                    p["done"] = True
+            else:
+                with self._lock:
+                    p["pkt_id"] = pkt_id
         self._publish(p, status, reported=mode)
 
 
@@ -163,5 +204,6 @@ def cmd_callback(topic, payload):
         log(f"cmd: box {DEVICE_ID} not connected, dropped {topic}{hint}")
         tracker.not_connected(label)
         return
-    if send_publish_to_box(DEVICE_ID, relative, payload):
-        tracker.sent(label, relative, payload)
+    pkt_id = send_publish_to_box(DEVICE_ID, relative, payload)
+    if pkt_id is not None:
+        tracker.sent(label, relative, payload, pkt_id)

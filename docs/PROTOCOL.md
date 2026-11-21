@@ -56,7 +56,7 @@ Sent shortly after connect:
 
 ### Full telemetry (~414 bytes)
 
-Sent every ~1–5 min:
+Sent every ~10 min (and ~5 s after each command):
 
 ```json
 {
@@ -88,6 +88,16 @@ Sent every ~1–5 min:
   "Vers_UC": 53
 }
 ```
+
+## Observed behaviour of the box (Dee Fly Cube, logs of a real installation)
+
+- TLS: negotiates **TLS 1.2, `AES256-SHA256`** with our broker.
+- In Programme mode, `current_mode` is `"Z"` (not the mode of the current time slot).
+- Telemetry also reports `Vers_UC` (e.g. 26) and `Vers_W` as a Unix timestamp (e.g. `1544745600.0` = 2018-12-14), not the `"21"` shown above.
+- MQTT CONNECT: keepalive **180 s**, clean session, SAS token as password; subscribes to `devices/<id>/messages/devicebound/#` with QoS 1.
+- Telemetry: a ~410-byte frame every **10 min** (QoS 1), **plus one about 5 s after each command** it receives.
+- **Its clock is wrong.** The `se` (expiry) of the SAS token it generates at each connection is in November 2016, follows real time from there, and goes back to the same 2016 date after a reboot: the box counts time since boot from a fixed date until it reaches its NTP server. **That server is a hard-coded IP address, `61.164.36.105` (UDP 123)**, queried about every 24 s while unsynchronised: no DNS lookup, so a local NTP server announced by DHCP is not used. If outbound traffic from the box is blocked, its clock stays in 2016. Consequence: a holiday range dated now (2026) is in the box's future, so `changeMode W…` is acknowledged but not applied (and a weekly schedule runs at wrong times). Fix: let it reach that address, or better, redirect UDP 123 from the box to a local NTP server with a destination NAT rule on the router.
+- **It reads a packet id in every PUBLISH it receives, even QoS 0 ones, and sends a PUBACK for it.** With a QoS 0 command, the first 2 bytes of the payload (`{"`) are taken as the packet id (PUBACK id `0x7b22`) and the command it parses starts with `method":…`. Mode changes seemed to work anyway (its parser is lenient), but commands are now sent with QoS 1, which gives it a real packet id and makes the PUBACK a receipt.
 
 ## Commands (Cloud → Device)
 
@@ -176,4 +186,4 @@ In practice the box accepts payloads without `id` and `jsonrpc` fields too. We s
 
 When the box's MQTT connection to Azure drops (every few minutes, especially on weak 2.4 GHz signal), any C2D commands queued at Azure are lost — Azure IoT Hub's default C2D message TTL is 1 hour but the **delivery only happens while the device is connected**. If the box reconnects every 30s but the auth fails 5 times out of 6 (Aldes' SAS-key minting endpoint returns 503 frequently), the C2D queue piles up and the box never sees the command.
 
-By being the broker ourselves, we don't have this problem: when we receive a command from HA, we send it immediately on the box's currently-active MQTT session (QoS 0: the box does not acknowledge it, so delivery is not confirmed — check the next telemetry frame's `current_mode`).
+By being the broker ourselves, we don't have this problem: when we receive a command from HA, we send it immediately on the box's currently-active MQTT session, with QoS 1. The box's PUBACK confirms receipt, and the telemetry frame it sends a few seconds later confirms the new `current_mode`.

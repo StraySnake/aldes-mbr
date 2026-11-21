@@ -106,7 +106,7 @@ def test_parse_allowed_ips():
 @pytest.mark.parametrize("macro,expected", [
     ("boost", ("is", "X")), ("quotidien", ("is", "V")), ("invites", ("is", "Y")),
     ("vacances7j", ("is", "W")), ("vacances_stop", ("not", "W")),
-    ("programme", None),      # Programme: the box may report the scheduled mode
+    ("programme", ("is", "Z")),  # a real box reports current_mode "Z" in Programme mode
     ("override_on", None),    # changeCMO: not reported in the telemetry
 ])
 def test_expected_mode_of_macros(macro, expected):
