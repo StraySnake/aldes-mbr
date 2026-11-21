@@ -3,7 +3,7 @@ import json, threading, time
 from datetime import datetime, timezone
 from .config import CMD_CONFIRM_GRACE, CMD_CONFIRM_TIMEOUT, DEVICE_ID, PREFIX
 from .logs import log
-from .macros import MODES, macro_payload
+from .macros import MODES, macro_payload, parse_holiday
 from .box import _sessions_lock, box_online, send_publish_to_box, sessions
 from . import runtime
 
@@ -65,6 +65,21 @@ class CommandTracker:
     def __init__(self):
         self._lock = threading.Lock()
         self._last = None  # dict describing the last command sent
+        self._normal_mode = None  # last mode other than W reported by the box
+        self._holiday_published = None  # None = unknown (e.g. after a restart)
+
+    def mode_before_holiday(self):
+        """Mode to restore when holidays are cancelled: the last non-holiday mode seen."""
+        with self._lock:
+            return self._normal_mode or "V"
+
+    @staticmethod
+    def _send_holiday(rng):
+        """Retained holiday range for HA ({} = none). The box does not report it."""
+        value = {} if rng is None else {"start": rng[0].isoformat(), "end": rng[1].isoformat()}
+        log(f"holiday range: {value or 'none'}")
+        if runtime.bridge:
+            runtime.bridge.publish("holiday", json.dumps(value), qos=1, retain=True)
 
     def _publish(self, info, status, reported=None):
         result = {
@@ -126,28 +141,46 @@ class CommandTracker:
         mode = frame.get("current_mode")
         if not isinstance(mode, str) or not mode:
             return  # boot heartbeat: says nothing about the mode
+        holiday = None  # what to publish on HOLIDAY_TOPIC after the lock: "clear" or a range
+        status = None
         with self._lock:
             p = self._last
-            if p is None or p["done"] or time.monotonic() - p["sent_at"] < CMD_CONFIRM_GRACE:
-                return
-            if p["expect"] is None:
-                # Not verifiable (Programme): still record what the box reports, once.
-                if not p["is_mode_change"] or p["observed"]:
-                    return
-                p["observed"] = True
-                status = p["status"]
-            else:
-                kind, code = p["expect"]
-                ok = (mode[0] == code) if kind == "is" else (mode[0] != code)
-                if ok or p["retried"]:
-                    p["timer"].cancel()
-                    p["done"] = True
-                    status = "confirmed" if ok else "failed"
+            if mode[0] in ("V", "X", "Y", "Z"):
+                self._normal_mode = mode[0]
+                # Out of holidays: clear the published range, unless a holiday command is
+                # still waiting for its confirmation (this frame may predate it).
+                holiday_pending = p is not None and not p["done"] and p["expected"] == "W"
+                if self._holiday_published is not False and not holiday_pending:
+                    self._holiday_published = False
+                    holiday = "clear"
+            if p is not None and not p["done"] and time.monotonic() - p["sent_at"] >= CMD_CONFIRM_GRACE:
+                if p["expect"] is None:
+                    # Not verifiable: still record what the box reports, once.
+                    if p["is_mode_change"] and not p["observed"]:
+                        p["observed"] = True
+                        status = p["status"]
                 else:
-                    p["retried"] = True
-                    p["acked"] = False
-                    p["sent_at"] = time.monotonic()
-                    status = "retrying"
+                    kind, code = p["expect"]
+                    ok = (mode[0] == code) if kind == "is" else (mode[0] != code)
+                    if ok or p["retried"]:
+                        p["timer"].cancel()
+                        p["done"] = True
+                        status = "confirmed" if ok else "failed"
+                        if ok and kind == "is" and code == "W":
+                            rng = _holiday_range(p["payload"])
+                            if rng:
+                                self._holiday_published = True
+                                holiday = rng
+                    else:
+                        p["retried"] = True
+                        p["acked"] = False
+                        p["sent_at"] = time.monotonic()
+                        status = "retrying"
+        # Network I/O outside the lock (paho's thread also calls into the tracker).
+        if holiday is not None:
+            self._send_holiday(None if holiday == "clear" else holiday)
+        if status is None:
+            return
         if status == "retrying":
             pkt_id = send_publish_to_box(DEVICE_ID, p["topic"], p["payload"])
             if pkt_id is None:
@@ -159,6 +192,13 @@ class CommandTracker:
                 with self._lock:
                     p["pkt_id"] = pkt_id
         self._publish(p, status, reported=mode)
+
+
+def _holiday_range(payload):
+    try:
+        return parse_holiday(json.loads(payload)["params"][0])
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
 
 
 tracker = CommandTracker()
@@ -187,7 +227,7 @@ def cmd_callback(topic, payload):
         macro_name = relative[len("macro/"):]
         if macro_name == "_select":
             macro_name = payload.decode("utf-8", errors="replace").strip()
-        translated = macro_payload(macro_name)
+        translated = macro_payload(macro_name, resume_mode=tracker.mode_before_holiday())
         if not translated:
             log(f"macro '{macro_name}' unknown, dropped")
             return

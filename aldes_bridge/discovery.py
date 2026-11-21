@@ -2,7 +2,7 @@
 import json
 from .config import (
     CMD_RESULT_TOPIC, DEVICE_MAC, DEVICE_MODEL, DEVICE_NAME, EVENTS_TOPIC, HA_DISCO_PREFIX,
-    LAST_SEEN_TOPIC, PREFIX, SENSOR_EXPIRE_AFTER, STATUS_TOPIC,
+    HOLIDAY_TOPIC, LAST_SEEN_TOPIC, PREFIX, SENSOR_EXPIRE_AFTER, STATUS_TOPIC,
 )
 from .logs import log
 from .macros import MODES, SELECT_OPTIONS
@@ -67,23 +67,17 @@ def publish_ha_discovery(client):
         topic = f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
 
-    # Holiday start/end. ASSUMPTION: Start_date_mode / End_date_mode use the same
-    # yyyyMMddHHmmssZ format as the changeMode W command (unverified on a real box);
-    # anything else, "" or the 0001-01-01 placeholder shows as unknown.
-    for obj_id, name, key in (("holiday_start", "Début des vacances", "Start_date_mode"),
-                              ("holiday_end", "Fin des vacances", "End_date_mode")):
-        tpl = (
-            "{% set d = (value_json." + key + " | default('')) | string %}"
-            "{% if d is match('^[0-9]{14}Z?$') and d[0:4] != '0001' %}"
-            "{{ d[0:4] }}-{{ d[4:6] }}-{{ d[6:8] }}T{{ d[8:10] }}:{{ d[10:12] }}:{{ d[12:14] }}+00:00"
-            "{% else %}None{% endif %}"
-        )
+    # Holiday start/end, published by the bridge on HOLIDAY_TOPIC when a holiday command
+    # is confirmed: a real box leaves Start_date_mode / End_date_mode empty, even in W.
+    for obj_id, name, key in (("holiday_start", "Début des vacances", "start"),
+                              ("holiday_end", "Fin des vacances", "end")):
+        tpl = "{{ value_json." + key + " | default(None) }}"
         client.publish(
             f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config",
             json.dumps({
                 "name": name,
                 "unique_id": f"{base_id}_{obj_id}",
-                "state_topic": EVENTS_TOPIC,
+                "state_topic": HOLIDAY_TOPIC,
                 "value_template": tpl,
                 "device_class": "timestamp",
                 "icon": "mdi:bag-suitcase",

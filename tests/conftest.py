@@ -149,7 +149,7 @@ def clear_retained(mqtt_port):
 
     def _clear():
         for topic in (f"aldes/vmc/raw/{EVENTS}", "aldes/vmc/last_seen", "aldes/vmc/status",
-                      "aldes/vmc/command_result"):
+                      "aldes/vmc/command_result", "aldes/vmc/holiday"):
             c.publish(topic, "", qos=1, retain=True).wait_for_publish(5)
 
     yield _clear

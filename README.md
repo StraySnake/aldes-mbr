@@ -76,7 +76,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    PUBLISH ... payload = {"outside_tpt":..., "current_mode":"V", ...}
    ```
 
-6. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Other entities: **Début / Fin des vacances**, **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
+6. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Other entities: **Début / Fin des vacances** (published by the bridge when holidays start, since the box does not report them), **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
 
 7. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
 
@@ -101,8 +101,10 @@ The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that transl
 | `quotidien` / `v` | mode V (V2) |
 | `invites` / `y` | mode Y (V3) |
 | `boost` / `x` | mode X (V4) |
-| `vacances` / `vacances<N>j` (e.g. `vacances1j`, `vacances21j`) | mode W with auto dates (now → now+N days, 1–365) |
-| `vacances_stop` | cancel holidays |
+| `vacances` / `vacances<N>j` (e.g. `vacances1j`, `vacances21j`) | mode W with auto dates (now − 1 min → now + N days, 1–365) |
+| `vacances_stop` | cancel holidays: back to the mode used before them (Quotidien if unknown) |
+
+Holidays rely on the box's clock, which is only set by NTP from a hard-coded address (see [docs/PROTOCOL.md](docs/PROTOCOL.md#observed-behaviour-of-the-box-dee-fly-cube-logs-of-a-real-installation)). If the box cannot reach it, its clock stays in 2016 and holiday commands are acknowledged but never start.
 | `programme` / `z` | mode Z (schedule) |
 | `override_on` / `override_off` | `changeCMO 1` / `changeCMO 0` |
 

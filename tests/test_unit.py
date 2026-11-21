@@ -29,7 +29,9 @@ def _holiday_days(macro):
     fmt = "%Y%m%d%H%M%SZ"
     start = datetime.strptime(code[1:16], fmt).replace(tzinfo=timezone.utc)
     end = datetime.strptime(code[16:], fmt).replace(tzinfo=timezone.utc)
-    assert abs(start - datetime.now(timezone.utc)) < timedelta(minutes=1)
+    # starts 1 min in the past (margin for a box clock slightly behind)
+    ago = datetime.now(timezone.utc) - start
+    assert timedelta(seconds=59) <= ago < timedelta(minutes=2)
     return (end - start).days
 
 
@@ -47,7 +49,10 @@ def test_invalid_macros(macro):
 
 
 def test_holiday_stop_and_override():
-    assert mode_of("vacances_stop") == "W" + "00010101000000Z" * 2
+    # a real box ignores the app's "W" + 0001-01-01 dates: cancel by switching mode
+    assert mode_of("vacances_stop") == "V"
+    assert json.loads(macros.macro_payload("vacances_stop", resume_mode="Y"))["params"] == ["Y"]
+    assert json.loads(macros.macro_payload("vacances_stop", resume_mode="W"))["params"] == ["V"]
     assert json.loads(macros.macro_payload("override_on")) == {"method": "changeCMO", "params": [1]}
     assert json.loads(macros.macro_payload("override_off")) == {"method": "changeCMO", "params": [0]}
 
@@ -105,7 +110,7 @@ def test_parse_allowed_ips():
 
 @pytest.mark.parametrize("macro,expected", [
     ("boost", ("is", "X")), ("quotidien", ("is", "V")), ("invites", ("is", "Y")),
-    ("vacances7j", ("is", "W")), ("vacances_stop", ("not", "W")),
+    ("vacances7j", ("is", "W")), ("vacances_stop", ("is", "V")),
     ("programme", ("is", "Z")),  # a real box reports current_mode "Z" in Programme mode
     ("override_on", None),    # changeCMO: not reported in the telemetry
 ])
@@ -118,3 +123,12 @@ def test_expected_mode_of_macros(macro, expected):
                                      b'{"method":"changeMode","params":["Q"]}'])
 def test_expected_mode_of_unverifiable_payloads(payload):
     assert commands.expected_mode(payload) is None
+
+
+def test_parse_holiday():
+    start, end = macros.parse_holiday("W20261121223139Z20261122223139Z")
+    assert start.isoformat() == "2026-11-21T22:31:39+00:00"
+    assert end.isoformat() == "2026-11-22T22:31:39+00:00"
+    assert macros.parse_holiday("W00010101000000Z00010101000000Z") is None
+    assert macros.parse_holiday("V") is None
+    assert macros.parse_holiday("Wgarbage") is None

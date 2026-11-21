@@ -144,7 +144,9 @@ To **cancel** holiday mode the Aldes app sends an epoch placeholder:
 {"method":"changeMode","params":["W00010101000000Z00010101000000Z"]}
 ```
 
-Or simply send `changeMode` with another mode (`V`, `X`, etc.) to overwrite.
+**On a real Dee Fly Cube this does not work**: the box acknowledges it and stays in `W`. Sending `changeMode` with another mode (`V`, `X`, etc.) does end the holidays, within seconds; that is what the bridge's `vacances_stop` macro does, restoring the mode used before the holidays.
+
+While in holidays, the box reports `current_mode: "W"` and `set_spd: 0`, but leaves `Start_date_mode` / `End_date_mode` empty: the bridge publishes the range itself on `<prefix>/holiday`.
 
 ### `changeCMO` — toggle "current mode override"
 
