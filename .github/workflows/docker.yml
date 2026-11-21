@@ -6,6 +6,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One publish per ref at a time, the newest wins: when several merges land in a row,
+# an older run finishing last must not move :latest back to older code.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest

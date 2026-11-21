@@ -72,7 +72,8 @@ The HF-LPB100 firmware in the Aldes Connect Box has a few oversights that make t
 | `upstream.py` | `UpstreamBridge`, the connection to Mosquitto |
 | `discovery.py` | Home Assistant MQTT discovery |
 | `app.py` | `main()`: wiring, accept loop, health file, shutdown |
-| `runtime.py` | the few objects shared at runtime (bridge, TLS context, command tracker) |
+| `clock.py` | whether the box's clock is set, from the expiry of the SAS token it signs at each connection |
+| `runtime.py` | the few objects shared at runtime (bridge, TLS context, command tracker, box clock state) |
 
 - **`gen_cert()`**: creates a self-signed TLS cert with CN=`aldesiotsuite.azure-devices.net` and SAN=`*.azure-devices.net`. Stored in `/data/` for persistence across container restarts.
 - **MQTT 3.1.1 codec**: minimal hand-rolled parser. Only the packet types we care about (CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, PUBACK, PINGREQ, DISCONNECT). No retained message handling, no QoS 2 — the box doesn't need them. Packets larger than 64 kB and a second CONNECT on the same connection close the connection.

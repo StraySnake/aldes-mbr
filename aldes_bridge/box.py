@@ -12,6 +12,7 @@ from .mqtt_codec import (
     encode_remaining_length, encode_string, parse_string, read_remaining_length, recv_exact,
 )
 from .telemetry import decode_frame, merge_telemetry
+from .clock import NTP_HINT, is_clock_set, parse_se
 from . import runtime
 
 
@@ -119,6 +120,27 @@ def send_publish_to_box(client_id, topic, payload):
         return None
 
 
+def _check_box_clock(addr, pwd):
+    """Infer from the SAS token expiry whether the box's clock is set; publish it."""
+    se = parse_se(pwd.decode("utf-8", errors="replace"))
+    if se is None:
+        return
+    clock_set = is_clock_set(se)
+    runtime.box_clock_set = clock_set
+    expiry = datetime.fromtimestamp(se, timezone.utc)
+    if clock_set:
+        log(f"{addr}   box clock: set (token expiry {expiry.isoformat(timespec='seconds')})")
+    else:
+        log(f"{addr}   box clock NOT SET (token expiry {expiry.date()}): {NTP_HINT}. "
+            f"Holidays will not start until it is.", "warning")
+    if runtime.bridge:
+        runtime.bridge.publish("box_clock", json.dumps({
+            "synced": clock_set,
+            "token_expiry": expiry.isoformat(timespec="seconds"),
+            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }), qos=1, retain=True)
+
+
 def _unregister(sess):
     """Remove the session only if it is still the registered one for its client_id
     (a newer connection from the same box may already have replaced it)."""
@@ -205,6 +227,8 @@ def handle_client(raw_sock, addr):
                 if cid != DEVICE_ID:
                     log(f"{addr}   WARNING: client_id != DEVICE_ID ({DEVICE_ID}); "
                         f"commands will NOT be routed to this client. Check DEVICE_MAC / DEVICE_ID.")
+                elif pwd:
+                    _check_box_clock(addr, pwd)
                 # MQTT spec: close the connection if nothing is received within 1.5x keepalive.
                 idle_timeout = (keepalive or DEFAULT_KEEPALIVE) * 1.5
                 tls_sock.settimeout(idle_timeout)

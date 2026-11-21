@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from .config import CMD_CONFIRM_GRACE, CMD_CONFIRM_TIMEOUT, DEVICE_ID, PREFIX
 from .logs import log
 from .macros import MODES, macro_payload, parse_holiday
+from .clock import NTP_HINT
 from .box import _sessions_lock, box_online, send_publish_to_box, sessions
 from . import runtime
 
@@ -22,6 +23,7 @@ CMD_STATUS_LABELS = {
     "sent": "Envoyée",
     "received": "Reçue par la box",
     "not_connected": "Box déconnectée",
+    "clock_not_set": "Refusée : horloge de la box non réglée",
 }
 _HOLIDAY_STOP = "W" + "00010101000000Z" * 2
 
@@ -95,6 +97,9 @@ class CommandTracker:
 
     def not_connected(self, label):
         self._publish({"label": label}, "not_connected")
+
+    def refused(self, label, status):
+        self._publish({"label": label}, status)
 
     def sent(self, label, topic, payload, pkt_id=0):
         expect = expected_mode(payload)
@@ -243,6 +248,11 @@ def cmd_callback(topic, payload):
         hint = f" (connected client_ids: {others})" if others else ""
         log(f"cmd: box {DEVICE_ID} not connected, dropped {topic}{hint}")
         tracker.not_connected(label)
+        return
+    if runtime.box_clock_set is False and _holiday_range(payload):
+        # The box would acknowledge it and stay in its current mode (clock in 2016).
+        log(f"cmd: holiday command '{label}' not sent: the box clock is not set, {NTP_HINT}", "warning")
+        tracker.refused(label, "clock_not_set")
         return
     pkt_id = send_publish_to_box(DEVICE_ID, relative, payload)
     if pkt_id is not None:

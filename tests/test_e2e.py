@@ -284,7 +284,8 @@ def discovery(mqtt_port):
     from conftest import Recorder
     rec = Recorder(mqtt_port, "disco-reader")
     rec.client.subscribe("homeassistant/#", qos=1)
-    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 28)
+    # 25 sensors + 1 binary sensor + 1 select + 9 buttons
+    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 36)
     rec.close()
     return {t: json.loads(rec.last(t)) for t in rec.msgs if t.startswith("homeassistant/") and rec.last(t)}
 
@@ -301,6 +302,22 @@ def test_discovery_expire_after_holiday_and_buttons(bridge, mqtt_port):
     btn = "homeassistant/button/aldes_vmc_AABBCCDDEEFF"
     assert cfgs[f"{btn}/btn_override_on/config"]["command_topic"] == "aldes/vmc/cmd/macro/override_on"
     assert f"{btn}/btn_override_off/config" in cfgs
+
+
+def test_discovery_optional_unknown_and_firmware_sensors(bridge, mqtt_port):
+    cfgs = discovery(mqtt_port)
+    base = "homeassistant/sensor/aldes_vmc_AABBCCDDEEFF"
+    # no air quality probe / no RSSI on many boxes: disabled by default
+    for obj in ("co2", "pm25", "voc", "rssi"):
+        assert cfgs[f"{base}/{obj}/config"]["enabled_by_default"] is False, obj
+    assert "enabled_by_default" not in cfgs[f"{base}/outside_temperature/config"]
+    # Vers_W is a Unix timestamp on recent boxes: shown as a date
+    assert "timestamp_custom" in cfgs[f"{base}/fw_wifi/config"]["value_template"]
+    # unknown fields exposed as disabled diagnostic sensors
+    for key in ("ff_cpt", "dep_ind", "dtb_ind", "cve_csn", "vi_csn", "tte_csn"):
+        cfg = cfgs[f"{base}/raw_{key}/config"]
+        assert cfg["enabled_by_default"] is False and cfg["entity_category"] == "diagnostic"
+        assert key in cfg["value_template"]
 
 
 def test_expire_after_can_be_disabled(start_bridge, mqtt_port):
@@ -550,3 +567,59 @@ def test_full_frame_logged_in_debug(start_bridge):
     box.publish(EVENTS, json.dumps(frame).encode())
     assert wait(lambda: '"current_mode": "V"' in bridge.log())
     box.close()
+
+
+# ---------- box clock ----------
+
+CLOCK = "aldes/vmc/box_clock"
+UNSET_CLOCK_SE = 1478918800  # what a real box signs right after boot: November 2016
+
+
+def box_clock(mqtt_client):
+    last = mqtt_client.last(CLOCK)
+    return json.loads(last) if last else {}
+
+
+def test_box_clock_set_reported(bridge, box, mqtt_client):
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    assert "box clock: set" in bridge.log()
+
+
+def test_box_clock_not_set_refuses_holidays_only(start_bridge, mqtt_client):
+    bridge = start_bridge({"CMD_CONFIRM_GRACE": "0.2"})
+    box = FakeBox(bridge.port, se=UNSET_CLOCK_SE)
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is False)
+    assert box_clock(mqtt_client)["token_expiry"].startswith("2016-11-12")
+    assert "box clock NOT SET" in bridge.log() and "61.164.36.105" in bridge.log()
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: result(mqtt_client).get("status") == "clock_not_set")
+    time.sleep(0.5)
+    assert not box.received('"W')  # not sent: the box would ignore it
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")  # other commands still work
+    assert wait(lambda: box.received('"X"'))
+    box.close()
+
+
+def test_box_clock_updated_on_reconnect(start_bridge, mqtt_client):
+    bridge = start_bridge()
+    box = FakeBox(bridge.port, se=UNSET_CLOCK_SE)
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is False)
+    box2 = FakeBox(bridge.port)  # reconnects once NTP answered
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: box2.received('"W2'))
+    box.close()
+    box2.close()
+
+
+def test_intruder_does_not_change_box_clock(bridge, box, mqtt_client):
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    intruder = FakeBox(bridge.port, cid="intruder", se=UNSET_CLOCK_SE)
+    time.sleep(1)
+    assert box_clock(mqtt_client)["synced"] is True
+    intruder.close()
+
+
+def test_box_clock_binary_sensor_discovered(bridge, mqtt_port):
+    cfg = discovery(mqtt_port)["homeassistant/binary_sensor/aldes_vmc_AABBCCDDEEFF/box_clock/config"]
+    assert cfg["device_class"] == "problem" and cfg["state_topic"] == CLOCK

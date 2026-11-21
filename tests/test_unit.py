@@ -132,3 +132,14 @@ def test_parse_holiday():
     assert macros.parse_holiday("W00010101000000Z00010101000000Z") is None
     assert macros.parse_holiday("V") is None
     assert macros.parse_holiday("Wgarbage") is None
+
+
+def test_box_clock_from_sas_token():
+    from aldes_bridge import clock
+    pwd = "SharedAccessSignature sr=hub%2Fdevices%2Fx&sig=abc%3D&se=1478918800"
+    assert clock.parse_se(pwd) == 1478918800
+    assert clock.parse_se("SharedAccessSignature sr=x&sig=y") is None
+    now = 1795300000  # 2026-11-21
+    assert not clock.is_clock_set(1478918800, now)      # boot date, Nov 2016
+    assert clock.is_clock_set(now + 38790, now)          # set (expiry a few hours ahead)
+    assert clock.is_clock_set(now - 3600, now)           # small offsets tolerated

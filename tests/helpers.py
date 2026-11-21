@@ -38,10 +38,13 @@ def remaining_length(n):
             return out
 
 
-def connect_pkt(cid, keepalive=60):
+def connect_pkt(cid, keepalive=60, se=None):
+    """se: expiry of the SAS token, computed by a real box from its own clock
+    (default: now + 1 h, i.e. a box whose clock is set)."""
+    se = int(time.time()) + 3600 if se is None else se
     # flags 0xC2: username + password + clean session, like the box
     vh = enc_str("MQTT") + bytes([4, 0xC2]) + struct.pack(">H", keepalive)
-    pl = enc_str(cid) + enc_str("hub/" + cid) + enc_str("SharedAccessSignature sr=x&sig=SECRET123&se=1")
+    pl = enc_str(cid) + enc_str("hub/" + cid) + enc_str(f"SharedAccessSignature sr=x&sig=SECRET123&se={se}")
     body = vh + pl
     return bytes([0x10]) + remaining_length(len(body)) + body
 
@@ -61,7 +64,7 @@ class FakeBox:
     its TLS I/O in one thread: send() only queues."""
 
     def __init__(self, port, cid=DEVICE_ID, keepalive=60, connect=True, source_ip=None,
-                 ack=True, quirky=False):
+                 ack=True, quirky=False, se=None):
         """ack: answer QoS 1 PUBLISHes with a PUBACK.
         quirky: behave like the real firmware, which reads a packet id in EVERY PUBLISH,
         QoS 0 included (eating the first 2 bytes of the payload), and acknowledges it."""
@@ -79,7 +82,7 @@ class FakeBox:
         self._out = deque()
         threading.Thread(target=self._io, daemon=True).start()
         if connect:
-            self.send(connect_pkt(cid, keepalive))
+            self.send(connect_pkt(cid, keepalive, se))
             self.send(subscribe_pkt(f"devices/{cid}/messages/devicebound/#"))
 
     def send(self, data):
