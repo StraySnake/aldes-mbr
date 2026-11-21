@@ -25,7 +25,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 1. **Pi-hole** (or any local DNS) rewrites `aldesiotsuite.azure-devices.net` → your Docker host
 2. The **fake broker** accepts the box's TLS connection with a self-signed cert (the HF-LPB100 firmware doesn't pin certs, only checks if the cipher suite matches — we serve legacy ciphers via `SECLEVEL=0`)
 3. The MQTT-CONNECT, SUBSCRIBE and PUBLISH frames are decoded, and PUBLISH telemetry is **republished to your Mosquitto** under `aldes/vmc/raw/...` with `retain=true`
-4. **Home Assistant MQTT discovery** is auto-published — sensors and a Mode select appear automatically under a "VMC Aldes Dee Fly Cube" device
+4. **Home Assistant MQTT discovery** is auto-published — sensors and a Mode select appear automatically under an "Aldes VMC" device (named after `DEVICE_NAME`)
 5. **Commands** are injected back into the box by publishing on `aldes/vmc/cmd/macro/<name>` — the broker translates the macro to the real Aldes JSON-RPC payload and forwards it on the box's `devicebound` topic
 
 ## Quick start
@@ -76,7 +76,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    PUBLISH ... payload = {"outside_tpt":..., "current_mode":"V", ...}
    ```
 
-6. **Open Home Assistant** — a "VMC Aldes" device should appear automatically with all sensors and a Mode select.
+6. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`).
 
 7. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
 
@@ -101,10 +101,12 @@ The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that transl
 | `quotidien` / `v` | mode V (V2) |
 | `invites` / `y` | mode Y (V3) |
 | `boost` / `x` | mode X (V4) |
-| `vacances` / `vacances1j` / `vacances7j` / `vacances14j` | mode W with auto dates (now → now+Nd) |
+| `vacances` / `vacances<N>j` (e.g. `vacances1j`, `vacances21j`) | mode W with auto dates (now → now+N days, 1–365) |
 | `vacances_stop` | cancel holidays |
 | `programme` / `z` | mode Z (schedule) |
 | `override_on` / `override_off` | `changeCMO 1` / `changeCMO 0` |
+
+Publish commands with `retain=false`: retained messages on `aldes/vmc/cmd/#` are ignored (they would otherwise be replayed to the box every time the bridge reconnects).
 
 ## Documentation
 

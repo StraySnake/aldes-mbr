@@ -23,9 +23,13 @@ Env vars:
   UPSTREAM_MQTT_PASS     optional auth
   BRIDGE_TOPIC_PREFIX    topic prefix for republished messages (default: aldes/vmc)
   LOG_FILE               additional log file (default: /logs/mitm.log)
+  LOG_MAX_BYTES          rotate LOG_FILE above this size (default: 5 MB, 0 = no rotation)
+  LOG_BACKUPS            number of rotated log files kept (default: 3)
 """
-import json, os, socket, ssl, struct, sys, threading, time, queue
-from datetime import datetime, timedelta
+import json, os, re, signal, socket, ssl, struct, sys, threading, time, warnings
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 CERT_DIR = Path(os.getenv("CERT_DIR", "/data"))
@@ -40,28 +44,46 @@ UPSTREAM_USER = os.getenv("UPSTREAM_MQTT_USER", "") or None
 UPSTREAM_PASS = os.getenv("UPSTREAM_MQTT_PASS", "") or None
 PREFIX = os.getenv("BRIDGE_TOPIC_PREFIX", "aldes/vmc")
 LOG_FILE = os.getenv("LOG_FILE", "/logs/mitm.log")
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+LOG_BACKUPS = int(os.getenv("LOG_BACKUPS", "3"))
 
 # Device identity — DEVICE_MAC is REQUIRED
 _DEVICE_MAC_RAW = os.getenv("DEVICE_MAC", "").upper().replace(":", "").replace("-", "")
-if not _DEVICE_MAC_RAW or len(_DEVICE_MAC_RAW) != 12:
+if not re.fullmatch(r"[0-9A-F]{12}", _DEVICE_MAC_RAW):
     sys.exit("FATAL: DEVICE_MAC env var is required (12 hex chars, with or without ':')")
 _DEVICE_SUFFIX = os.getenv("DEVICE_SUFFIX", "_AIR")  # Aldes appends "_AIR" for ventilation
-_DEVICE_ID_DEFAULT = _DEVICE_MAC_RAW + _DEVICE_SUFFIX
+DEVICE_MAC = _DEVICE_MAC_RAW
+DEVICE_ID = os.getenv("DEVICE_ID", "") or (DEVICE_MAC + _DEVICE_SUFFIX)
 DEVICE_NAME = os.getenv("DEVICE_NAME", "Aldes VMC")
 DEVICE_MODEL = os.getenv("DEVICE_MODEL", "Dee Fly Cube")
-HA_DISCOVERY_PREFIX = os.getenv("HA_DISCOVERY_PREFIX", "homeassistant")
+HA_DISCO_PREFIX = os.getenv("HA_DISCOVERY_PREFIX", "homeassistant")
+
+EVENTS_TOPIC = f"{PREFIX}/raw/devices/{DEVICE_ID}/messages/events/"
+CMD_TOPIC = f"{PREFIX}/cmd/devices/{DEVICE_ID}/messages/devicebound"
+# Availability: "online" while the bridge is up AND the box has an active session.
+STATUS_TOPIC = f"{PREFIX}/status"
 
 HOST = "0.0.0.0"
 PORT = 8883
+
+# Timeouts (seconds)
+HANDSHAKE_TIMEOUT = 30      # TLS handshake + first CONNECT packet
+DEFAULT_KEEPALIVE = 180     # used when the box announces keepalive=0
+# The box sends ~1 kB telemetry frames; refuse anything absurd instead of buffering it.
+MAX_PACKET_SIZE = 64 * 1024
+# How often the connection thread checks for commands queued by other threads.
+POLL_INTERVAL = 0.2
 
 
 # ---------- logging ----------
 
 _log_lock = threading.Lock()
-_log_fp = None
+_log_handler = None
 try:
     Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-    _log_fp = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+    _log_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=max(LOG_MAX_BYTES, 0), backupCount=LOG_BACKUPS, encoding="utf-8",
+    )
 except Exception:
     pass
 
@@ -70,11 +92,23 @@ def log(msg):
     line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
     with _log_lock:
         print(line, flush=True)
-        if _log_fp:
+        if _log_handler:
             try:
-                _log_fp.write(line + "\n")
+                _log_handler.stream.write(line + "\n")
+                _log_handler.stream.flush()
+                if LOG_MAX_BYTES > 0 and _log_handler.stream.tell() >= LOG_MAX_BYTES:
+                    _log_handler.doRollover()
             except Exception:
                 pass
+
+
+def redact_password(pwd):
+    """Never log the SAS token: it is a valid credential for the real Azure IoT Hub."""
+    text = pwd.decode("utf-8", errors="replace")
+    redacted = re.sub(r"(sig=)[^&]+", r"\1<redacted>", text)
+    if redacted == text and len(text) > 8:
+        redacted = text[:8] + "...<redacted>"
+    return redacted
 
 
 # ---------- self-signed cert ----------
@@ -93,13 +127,14 @@ def gen_cert():
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "FakeAzure"),
         x509.NameAttribute(NameOID.COMMON_NAME, SERVER_CN),
     ])
+    now = datetime.now(timezone.utc)
     cert = (
         x509.CertificateBuilder()
         .subject_name(name).issuer_name(name)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow() - timedelta(days=1))
-        .not_valid_after(datetime.utcnow() + timedelta(days=365 * 10))
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=365 * 10))
         .add_extension(
             x509.SubjectAlternativeName([
                 x509.DNSName(SERVER_CN),
@@ -115,29 +150,45 @@ def gen_cert():
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     ))
+    try:
+        os.chmod(KEY_FILE, 0o600)
+    except OSError:
+        pass
     log(f"cert written: {CERT_FILE}")
 
 
 # ---------- minimal MQTT 3.1.1 codec ----------
 
-CONNECT, CONNACK, PUBLISH, PUBACK, SUBSCRIBE, SUBACK, PINGREQ, PINGRESP, DISCONNECT = (
-    1, 2, 3, 4, 8, 9, 12, 13, 14
+CONNECT, CONNACK, PUBLISH, PUBACK, SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT = (
+    1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14
 )
+
+
+class ConnectionClosed(Exception):
+    pass
+
+
+def recv_exact(s, n):
+    """Read exactly n bytes, or raise ConnectionClosed if the peer goes away mid-packet."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionClosed()
+        buf += chunk
+    return bytes(buf)
 
 
 def read_remaining_length(s):
     multiplier = 1
     value = 0
     for _ in range(4):
-        b = s.recv(1)
-        if not b:
-            return None
-        digit = b[0]
+        digit = recv_exact(s, 1)[0]
         value += (digit & 0x7F) * multiplier
         if (digit & 0x80) == 0:
             return value
         multiplier *= 128
-    return value
+    raise ValueError("malformed remaining length")
 
 
 def encode_remaining_length(length):
@@ -163,35 +214,106 @@ def encode_string(s):
     return struct.pack(">H", len(b)) + b
 
 
+# ---------- box sessions ----------
+
+# client_id -> Session. Guarded by _sessions_lock.
+sessions = {}
+_sessions_lock = threading.Lock()
+
+
+class Session:
+    """One box connection.
+
+    All TLS I/O happens in the connection's own thread: OpenSSL does not support
+    reading and writing one SSL object from two threads at once. Other threads
+    (paho's, for injected commands) queue their packets; the connection thread
+    sends them within POLL_INTERVAL.
+    """
+
+    def __init__(self, sock, addr):
+        self.sock = sock
+        self.addr = addr
+        self.client_id = None
+        self.subs = []
+        self.owner = threading.get_ident()
+        self._outbox = deque()
+
+    def send(self, data):
+        if threading.get_ident() == self.owner:
+            self.sock.sendall(data)
+        else:
+            self._outbox.append(data)
+
+    def flush(self):
+        """Owner thread only: send packets queued by other threads."""
+        while self._outbox:
+            self.sock.sendall(self._outbox.popleft())
+
+    def kill(self):
+        """Any thread: abort the connection at the TCP level, without touching the SSL
+        object. The owner thread then sees EOF/an error and cleans up."""
+        try:
+            socket.socket.shutdown(self.sock, socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def box_online():
+    with _sessions_lock:
+        return DEVICE_ID in sessions
+
+
 # ---------- upstream bridge to user's Mosquitto ----------
 
 class UpstreamBridge:
     def __init__(self):
         import paho.mqtt.client as mqtt
-        self.client = mqtt.Client(client_id="aldes-mitm-bridge", clean_session=True)
+        self.client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id="aldes-mitm-bridge",
+            clean_session=True,
+        )
         if UPSTREAM_USER:
             self.client.username_pw_set(UPSTREAM_USER, UPSTREAM_PASS)
+        self.client.will_set(STATUS_TOPIC, "offline", qos=1, retain=True)
+        self.client.reconnect_delay_set(min_delay=1, max_delay=60)
         self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
         self.cmd_callbacks = []  # list of fn(topic, payload) called when user injects a cmd
-        self._connect()
+        self._status_lock = threading.Lock()  # keeps "compute status" + "publish" atomic
+        # connect_async + loop_start: paho keeps retrying in the background, so the bridge
+        # comes up even if Mosquitto starts after us (e.g. NAS boot).
+        self.client.connect_async(UPSTREAM_HOST, UPSTREAM_PORT, keepalive=60)
+        self.client.loop_start()
+        log(f"upstream MQTT connecting to {UPSTREAM_HOST}:{UPSTREAM_PORT}...")
 
-    def _connect(self):
-        try:
-            self.client.connect(UPSTREAM_HOST, UPSTREAM_PORT, keepalive=60)
-            self.client.loop_start()
-            log(f"upstream MQTT connected to {UPSTREAM_HOST}:{UPSTREAM_PORT}")
-        except Exception as e:
-            log(f"upstream MQTT FAILED: {e}")
-
-    def _on_connect(self, client, userdata, flags, rc):
-        log(f"upstream on_connect rc={rc}")
-        # Subscribe to command-injection topic so HA can publish e.g. aldes/vmc/cmd/changeMode
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code.is_failure:
+            log(f"upstream MQTT connection refused: {reason_code}")
+            return
+        log(f"upstream MQTT connected to {UPSTREAM_HOST}:{UPSTREAM_PORT}")
+        # Subscribe to command-injection topic so HA can publish e.g. aldes/vmc/cmd/macro/boost
         client.subscribe(f"{PREFIX}/cmd/#")
-        # Publish HA MQTT discovery for the VMC entities
         publish_ha_discovery(client)
+        self.publish_status()
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        log(f"upstream MQTT disconnected: {reason_code} (will retry)")
 
     def _on_message(self, client, userdata, msg):
+        if msg.retain:
+            # A command published with retain=true would be replayed by Mosquitto at every
+            # (re)connect of the bridge, e.g. restarting holidays after each reboot.
+            log(f"upstream RX cmd topic={msg.topic} IGNORED: retained message "
+                f"(publish commands with retain=false; clear it by publishing an empty retained message)")
+            return
         log(f"upstream RX cmd topic={msg.topic} payload={msg.payload!r}")
         for cb in self.cmd_callbacks:
             try:
@@ -206,17 +328,31 @@ class UpstreamBridge:
         except Exception as e:
             log(f"upstream publish err: {e}")
 
+    def publish_status(self):
+        # Under a lock so that a session closing and a session opening at the same time
+        # cannot publish their states in the wrong order (stale "offline" after "online").
+        with self._status_lock:
+            try:
+                self.client.publish(STATUS_TOPIC, "online" if box_online() else "offline",
+                                    qos=1, retain=True)
+            except Exception as e:
+                log(f"upstream status publish err: {e}")
+
+    def stop(self):
+        try:
+            with self._status_lock:
+                info = self.client.publish(STATUS_TOPIC, "offline", qos=1, retain=True)
+            info.wait_for_publish(2)
+        except Exception:
+            pass
+        self.client.disconnect()
+        self.client.loop_stop()
+
 
 bridge = None
 
 
 # ---------- Home Assistant MQTT Discovery ----------
-
-DEVICE_ID = os.getenv("DEVICE_ID", "") or _DEVICE_ID_DEFAULT
-DEVICE_MAC = _DEVICE_MAC_RAW
-HA_DISCO_PREFIX = HA_DISCOVERY_PREFIX
-EVENTS_TOPIC = f"{PREFIX}/raw/devices/{DEVICE_ID}/messages/events/"
-CMD_TOPIC = f"{PREFIX}/cmd/devices/{DEVICE_ID}/messages/devicebound"
 
 DEVICE_BLOCK = {
     "identifiers": [f"aldes_vmc_{DEVICE_MAC}"],
@@ -224,6 +360,12 @@ DEVICE_BLOCK = {
     "manufacturer": "Aldes",
     "model": DEVICE_MODEL,
     "sw_version": "Connect Box (HF-LPB100)",
+}
+
+AVAILABILITY = {
+    "availability_topic": STATUS_TOPIC,
+    "payload_available": "online",
+    "payload_not_available": "offline",
 }
 
 # Each tuple: (object_id, friendly_name, payload_key, dict_extra)
@@ -245,17 +387,19 @@ SENSORS = [
     ("fw_uc",               "Firmware MCU",          "Vers_UC",     {"icon": "mdi:chip", "entity_category": "diagnostic"}),
 ]
 
+# Single source of truth for mode codes <-> labels (validated on Dee Fly Cube: X = max boost).
 MODES = {
     "V": "Quotidien",
     "W": "Vacances",
-    "X": "Invités",
-    "Y": "Boost",
+    "X": "Boost",
+    "Y": "Invités",
     "Z": "Programme",
 }
+SELECT_OPTIONS = ["Quotidien", "Vacances", "Invités", "Boost", "Programme"]
 
 
 def publish_ha_discovery(client):
-    """Publish HA MQTT Discovery configs for all VMC entities. Called once on bridge connect."""
+    """Publish HA MQTT Discovery configs for all VMC entities. Called on each upstream connect."""
     log("publishing HA discovery...")
     base_id = f"aldes_vmc_{DEVICE_MAC}"
 
@@ -267,23 +411,31 @@ def publish_ha_discovery(client):
             "state_topic": EVENTS_TOPIC,
             "value_template": f"{{{{ value_json.{key} | default(none) }}}}",
             "device": DEVICE_BLOCK,
+            **AVAILABILITY,
             **extra,
         }
         topic = f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
 
-    # Mode select : 4 ventilation modes + Programme. Vacances auto-resolves now / now+1d
-    # via a special "macro" topic the broker translates server-side (date math is hard in Jinja).
+    # Mode select. "Vacances" auto-resolves now -> now+1d via the macro translator
+    # (date math is hard in Jinja). The boot heartbeat has no current_mode: keep the
+    # previous state in that case (HA ignores an empty template output).
+    mode_map = json.dumps(MODES, ensure_ascii=False).replace('"', "'")
     mode_select_cfg = {
         "name": "Mode",
         "unique_id": f"{base_id}_mode",
         "state_topic": EVENTS_TOPIC,
-        "value_template": "{% set m = {'W':'Vacances','V':'Quotidien','Y':'Invités','X':'Boost'} %}{{ m.get(value_json.current_mode, 'Inconnu') }}",
+        "value_template": (
+            "{% set m = " + mode_map + " %}"
+            "{% set code = (value_json.current_mode | default(''))[:1] %}"
+            "{{ m[code] if code in m else '' }}"
+        ),
         "command_topic": f"{PREFIX}/cmd/macro/_select",
         "command_template": "{{ value }}",
-        "options": ["Vacances", "Quotidien", "Invités", "Boost"],
+        "options": SELECT_OPTIONS,
         "icon": "mdi:fan-clock",
         "device": DEVICE_BLOCK,
+        **AVAILABILITY,
     }
     client.publish(
         f"{HA_DISCO_PREFIX}/select/{base_id}/mode/config",
@@ -309,6 +461,7 @@ def publish_ha_discovery(client):
             "payload_press": "1",
             "icon": icon,
             "device": DEVICE_BLOCK,
+            **AVAILABILITY,
         }
         client.publish(
             f"{HA_DISCO_PREFIX}/button/{base_id}/btn_{key}/config",
@@ -320,59 +473,91 @@ def publish_ha_discovery(client):
 
 # ---------- per-client MQTT handler ----------
 
-# Track connected box sessions so we can inject commands back to them
-sessions = {}  # client_id -> {sock, lock, subscriptions, last_pkt_id}
-
-
-def send_publish_to_box(client_id, topic, payload, qos=0):
-    """Inject a PUBLISH back to a connected device — used for command injection."""
-    sess = sessions.get(client_id)
+def send_publish_to_box(client_id, topic, payload):
+    """Inject a QoS 0 PUBLISH back to a connected device — used for command injection."""
+    with _sessions_lock:
+        sess = sessions.get(client_id)
     if not sess:
         log(f"inject: client {client_id} not connected")
         return False
-    pkt = bytes([0x30 | (qos << 1)])  # PUBLISH header (qos=0 default)
-    body = encode_string(topic) + payload.encode() if isinstance(payload, str) else encode_string(topic) + payload
-    pkt += encode_remaining_length(len(body)) + body
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+    body = encode_string(topic) + payload
+    pkt = bytes([0x30]) + encode_remaining_length(len(body)) + body
     try:
-        with sess["lock"]:
-            sess["sock"].sendall(pkt)
-        log(f"inject: sent to {client_id} topic={topic} ({len(payload)} bytes)")
+        sess.send(pkt)  # queued, written by the session's own thread
+        log(f"inject: queued for {client_id} topic={topic} ({len(payload)} bytes)")
         return True
     except Exception as e:
         log(f"inject err: {e}")
         return False
 
 
-def handle_client(tls_sock, addr):
+def _unregister(sess):
+    """Remove the session only if it is still the registered one for its client_id
+    (a newer connection from the same box may already have replaced it)."""
+    if not sess.client_id:
+        return False
+    with _sessions_lock:
+        if sessions.get(sess.client_id) is sess:
+            del sessions[sess.client_id]
+            return True
+    return False
+
+
+def handle_client(raw_sock, addr):
     log(f"NEW CONNECTION from {addr}")
-    client_id = None
-    sock_lock = threading.Lock()
-    subs = []
+    sess = None
+    tls_sock = None
     try:
+        raw_sock.settimeout(HANDSHAKE_TIMEOUT)
+        tls_sock = ctx.wrap_socket(raw_sock, server_side=True, do_handshake_on_connect=False)
+        tls_sock.do_handshake()
+        sess = Session(tls_sock, addr)
+        idle_timeout = HANDSHAKE_TIMEOUT  # until CONNECT, then 1.5x keepalive
+        last_rx = time.monotonic()
+
         while True:
-            head = tls_sock.recv(1)
+            tls_sock.settimeout(idle_timeout)
+            sess.flush()
+            # Short recv timeout to pick up queued commands regularly. Not select():
+            # OpenSSL may already hold the next record in memory (e.g. CONNECT read
+            # together with the handshake), and select() would not see it.
+            tls_sock.settimeout(POLL_INTERVAL)
+            try:
+                head = tls_sock.recv(1)
+            except socket.timeout:
+                if time.monotonic() - last_rx > idle_timeout:
+                    raise
+                continue
             if not head:
                 break
+            tls_sock.settimeout(idle_timeout)  # bounds a stalled mid-packet read
             ptype = (head[0] >> 4) & 0xF
             flags = head[0] & 0xF
             length = read_remaining_length(tls_sock)
-            if length is None:
-                break
-            payload = b""
-            while len(payload) < length:
-                chunk = tls_sock.recv(length - len(payload))
-                if not chunk:
-                    break
-                payload += chunk
+            if length > MAX_PACKET_SIZE:
+                raise ValueError(f"packet too large ({length} bytes, max {MAX_PACKET_SIZE})")
+            payload = recv_exact(tls_sock, length)
+            last_rx = time.monotonic()
 
-            if ptype == CONNECT:
+            if ptype == CONNECT and sess.client_id is not None:
+                # MQTT 3.1.1 §3.1: a second CONNECT is a protocol violation -> disconnect.
+                # (Otherwise the first client_id would stay registered on a dead session.)
+                log(f"{addr} second CONNECT on the same connection, closing")
+                break
+
+            elif ptype == CONNECT:
                 proto, off = parse_string(payload, 0)
                 level = payload[off]; off += 1
                 cflags = payload[off]; off += 1
                 keepalive = struct.unpack_from(">H", payload, off)[0]; off += 2
                 cid, off = parse_string(payload, off)
-                client_id = cid
                 username = pwd = None
+                if cflags & 0x04:  # will flag: skip will topic + will message
+                    _, off = parse_string(payload, off)
+                    wlen = struct.unpack_from(">H", payload, off)[0]
+                    off += 2 + wlen
                 if cflags & 0x80:
                     username, off = parse_string(payload, off)
                 if cflags & 0x40:
@@ -383,14 +568,26 @@ def handle_client(tls_sock, addr):
                 log(f"{addr}   client_id = {cid}")
                 log(f"{addr}   username  = {username}")
                 if pwd:
-                    log(f"{addr}   password  = {pwd[:60]!r}{'...' if len(pwd)>60 else ''}")
-                # Register session
-                sessions[cid] = {"sock": tls_sock, "lock": sock_lock, "subs": subs}
+                    log(f"{addr}   password  = {redact_password(pwd)}")
+                if cid != DEVICE_ID:
+                    log(f"{addr}   WARNING: client_id != DEVICE_ID ({DEVICE_ID}); "
+                        f"commands will NOT be routed to this client. Check DEVICE_MAC / DEVICE_ID.")
+                # MQTT spec: close the connection if nothing is received within 1.5x keepalive.
+                idle_timeout = (keepalive or DEFAULT_KEEPALIVE) * 1.5
+                tls_sock.settimeout(idle_timeout)
+                sess.client_id = cid
+                with _sessions_lock:
+                    old = sessions.get(cid)
+                    sessions[cid] = sess
+                if old is not None:
+                    # Same box reconnected: drop the stale (half-open) socket.
+                    log(f"{addr}   replacing previous session from {old.addr}")
+                    old.kill()
                 # Reply CONNACK accepted (session_present=0, return_code=0)
-                tls_sock.sendall(bytes([0x20, 0x02, 0x00, 0x00]))
-                # Bridge metadata
+                sess.send(bytes([0x20, 0x02, 0x00, 0x00]))
                 if bridge:
-                    bridge.publish(f"_meta/connect", f"{cid} u={username}")
+                    bridge.publish("_meta/connect", f"{cid} from {addr[0]}")
+                    bridge.publish_status()
 
             elif ptype == PUBLISH:
                 qos = (flags >> 1) & 0x3
@@ -403,10 +600,14 @@ def handle_client(tls_sock, addr):
                 log(f"{addr} PUBLISH qos={qos} topic={topic} ({len(msg)}b)")
                 log(f"{addr}   payload = {preview!r}{'...' if len(msg)>300 else ''}")
                 if qos == 1 and pkt_id is not None:
-                    tls_sock.sendall(bytes([0x40, 0x02]) + struct.pack(">H", pkt_id))
+                    sess.send(bytes([0x40, 0x02]) + struct.pack(">H", pkt_id))
+                elif qos == 2 and pkt_id is not None:
+                    # Not expected from the box; acknowledge with PUBREC so it doesn't stall.
+                    sess.send(bytes([0x50, 0x02]) + struct.pack(">H", pkt_id))
                 # Bridge to upstream — retain=true so HA has the last value after reloads
                 if bridge:
-                    bridge.publish(f"raw/{topic.replace('$', '_').replace('#', '_')}", msg, retain=True)
+                    bridge.publish(f"raw/{topic.replace('$', '_').replace('#', '_').replace('+', '_')}",
+                                   msg, retain=True)
 
             elif ptype == SUBSCRIBE:
                 pkt_id = struct.unpack_from(">H", payload, 0)[0]
@@ -414,19 +615,25 @@ def handle_client(tls_sock, addr):
                 topics = []
                 while off < len(payload):
                     t, off = parse_string(payload, off)
-                    qos = payload[off]; off += 1
-                    topics.append((t, qos))
-                    subs.append(t)
+                    q = payload[off]; off += 1
+                    topics.append((t, q))
+                    sess.subs.append(t)
                 log(f"{addr} SUBSCRIBE pkt_id={pkt_id}")
                 for t, q in topics:
                     log(f"{addr}   topic = {t!r}  qos={q}")
-                resp = bytes([0x90])
                 body = struct.pack(">H", pkt_id) + bytes([min(q, 1) for _, q in topics])
-                resp += encode_remaining_length(len(body)) + body
-                tls_sock.sendall(resp)
+                sess.send(bytes([0x90]) + encode_remaining_length(len(body)) + body)
+
+            elif ptype == UNSUBSCRIBE:
+                pkt_id = struct.unpack_from(">H", payload, 0)[0]
+                log(f"{addr} UNSUBSCRIBE pkt_id={pkt_id}")
+                sess.send(bytes([0xB0, 0x02]) + struct.pack(">H", pkt_id))
 
             elif ptype == PINGREQ:
-                tls_sock.sendall(bytes([0xD0, 0x00]))
+                sess.send(bytes([0xD0, 0x00]))
+
+            elif ptype == PUBACK:
+                pass  # we only send QoS 0, but tolerate it
 
             elif ptype == DISCONNECT:
                 log(f"{addr} DISCONNECT")
@@ -435,24 +642,35 @@ def handle_client(tls_sock, addr):
                 log(f"{addr} unknown packet type={ptype} flags={flags} len={length}")
                 if payload:
                     log(f"{addr}   data = {payload[:60].hex(' ')}")
+    except ConnectionClosed:
+        log(f"{addr} connection closed by peer mid-packet")
+    except socket.timeout:
+        log(f"{addr} timeout (no traffic within keepalive window)")
     except ssl.SSLError as e:
         log(f"{addr} TLS error: {e}")
     except Exception as e:
         log(f"{addr} error: {type(e).__name__}: {e}")
     finally:
-        try:
-            tls_sock.close()
-        except Exception:
-            pass
-        if client_id and client_id in sessions:
-            del sessions[client_id]
-        log(f"{addr} closed (client_id={client_id})")
+        if sess:
+            sess.close()
+        else:
+            try:
+                (tls_sock or raw_sock).close()
+            except Exception:
+                pass
+        if sess and _unregister(sess) and bridge:
+            bridge.publish_status()
+        log(f"{addr} closed (client_id={sess.client_id if sess else None})")
+
+
+_VACANCES_RE = re.compile(r"vacances(\d+)?[jd]?")
 
 
 def _macro_payload(macro):
     """Translate a high-level macro name to the proper Aldes JSON-RPC payload."""
-    from datetime import datetime, timedelta, timezone
-    m = macro.strip().lower().replace("é", "e").replace("è", "e")
+    m = macro.strip().lower()
+    for a, b in (("é", "e"), ("è", "e"), ("ê", "e")):
+        m = m.replace(a, b)
     if m in ("quotidien", "v", "v2"):
         return '{"method":"changeMode","params":["V"]}'
     if m in ("invites", "y", "v3", "guests", "kitchen", "cuisine"):
@@ -469,15 +687,17 @@ def _macro_payload(macro):
         # Cancelling holidays: send epoch placeholder per APK
         epoch = "00010101000000Z"
         return '{"method":"changeMode","params":["W' + epoch + epoch + '"]}'
-    if m.startswith("vacances") or m == "w":
-        # vacances / vacances1j / vacances7j / vacances14j → now → now + N days (default 1)
-        days = 1
-        for n in (14, 7, 3, 1):
-            if m.endswith(f"{n}j") or m.endswith(f"{n}d"):
-                days = n; break
+    match = _VACANCES_RE.fullmatch(m)
+    if m == "w" or match:
+        # vacances / vacances<N>j / vacances<N>d → now → now + N days (default 1)
+        days = int(match.group(1)) if match and match.group(1) else 1
+        if not 1 <= days <= 365:
+            log(f"macro '{macro}': holiday duration {days} days out of range (1-365)")
+            return None
         fmt = "%Y%m%d%H%M%SZ"
-        start = datetime.now(timezone.utc).strftime(fmt)
-        end = (datetime.now(timezone.utc) + timedelta(days=days)).strftime(fmt)
+        now = datetime.now(timezone.utc)
+        start = now.strftime(fmt)
+        end = (now + timedelta(days=days)).strftime(fmt)
         return '{"method":"changeMode","params":["W' + start + end + '"]}'
     return None
 
@@ -491,6 +711,11 @@ def cmd_callback(topic, payload):
     if not topic.startswith(f"{PREFIX}/cmd/"):
         return
     relative = topic[len(f"{PREFIX}/cmd/"):]
+    if not payload:
+        # Clearing a retained message publishes an empty payload: it must not trigger
+        # the macro (macros are chosen by topic name, the payload is not used).
+        log(f"cmd: empty payload on {topic}, ignored")
+        return
 
     # Macro mode:
     #   aldes/vmc/cmd/macro/<name>           -> use <name>
@@ -498,10 +723,7 @@ def cmd_callback(topic, payload):
     if relative.startswith("macro/"):
         macro_name = relative[len("macro/"):]
         if macro_name == "_select":
-            try:
-                macro_name = payload.decode("utf-8").strip()
-            except Exception:
-                macro_name = ""
+            macro_name = payload.decode("utf-8", errors="replace").strip()
         translated = _macro_payload(macro_name)
         if not translated:
             log(f"macro '{macro_name}' unknown, dropped")
@@ -510,37 +732,55 @@ def cmd_callback(topic, payload):
         payload = translated.encode()
         log(f"macro '{macro_name}' -> {translated}")
 
-    # Send to first connected session (typical: 1 box)
-    if not sessions:
-        log(f"cmd: no active box session, dropped {topic}")
+    # Only ever send to the configured box, never to another LAN client that connected.
+    if not box_online():
+        with _sessions_lock:
+            others = list(sessions)
+        hint = f" (connected client_ids: {others})" if others else ""
+        log(f"cmd: box {DEVICE_ID} not connected, dropped {topic}{hint}")
         return
-    cid = next(iter(sessions.keys()))
-    send_publish_to_box(cid, relative, payload)
+    send_publish_to_box(DEVICE_ID, relative, payload)
+
+
+def _build_ssl_context():
+    c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    c.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
+    c.check_hostname = False
+    c.verify_mode = ssl.CERT_NONE
+    # HF-LPB100 firmware speaks legacy TLS (small set of older ciphers).
+    # Relax everything so we can negotiate.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # intentional: legacy box
+            c.minimum_version = ssl.TLSVersion.TLSv1
+    except (AttributeError, ValueError):
+        pass
+    try:
+        c.set_ciphers("ALL:@SECLEVEL=0")
+    except ssl.SSLError as e:
+        log(f"set_ciphers err: {e}")
+    return c
+
+
+ctx = None
+
+
+def _on_sigterm(signum, frame):
+    # Only raise here: log() and paho take locks that the interrupted main thread
+    # might be holding. The cleanup runs in main()'s finally block instead.
+    raise SystemExit(0)
 
 
 def main():
-    global bridge
+    global bridge, ctx
+    signal.signal(signal.SIGTERM, _on_sigterm)
     gen_cert()
+    ctx = _build_ssl_context()
     try:
         bridge = UpstreamBridge()
         bridge.cmd_callbacks.append(cmd_callback)
     except Exception as e:
         log(f"bridge init failed: {e} (will run without bridge)")
-
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    # HF-LPB100 firmware speaks legacy TLS (small set of older ciphers).
-    # Relax everything so we can negotiate.
-    try:
-        ctx.minimum_version = ssl.TLSVersion.TLSv1
-    except (AttributeError, ValueError):
-        pass
-    try:
-        ctx.set_ciphers("ALL:@SECLEVEL=0")
-    except ssl.SSLError as e:
-        log(f"set_ciphers err: {e}")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -548,16 +788,24 @@ def main():
     sock.listen(8)
     log(f"fake Azure IoT Hub listening on {HOST}:{PORT} (TLS, CN={SERVER_CN})")
     log(f"bridging captured PUBLISHes to mqtt://{UPSTREAM_HOST}:{UPSTREAM_PORT} prefix={PREFIX}")
+    log(f"expecting box client_id={DEVICE_ID}")
 
-    while True:
-        client, addr = sock.accept()
-        try:
-            tls = ctx.wrap_socket(client, server_side=True)
-            threading.Thread(target=handle_client, args=(tls, addr), daemon=True).start()
-        except ssl.SSLError as e:
-            log(f"{addr} TLS handshake FAILED: {e}")
-            try: client.close()
-            except: pass
+    try:
+        while True:
+            try:
+                client, addr = sock.accept()
+            except OSError as e:
+                log(f"accept err: {e}")
+                continue
+            # TLS handshake happens in the worker thread so a slow/broken client can't
+            # block the accept loop (or crash it with a non-SSL exception).
+            threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+    except KeyboardInterrupt:
+        pass  # Ctrl+C: same clean shutdown as SIGTERM
+    finally:
+        log("shutting down")
+        if bridge:
+            bridge.stop()  # publishes "offline" so HA marks the entities unavailable
 
 
 if __name__ == "__main__":

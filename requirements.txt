@@ -1,0 +1,2 @@
+cryptography>=42,<47
+paho-mqtt>=2.0,<3

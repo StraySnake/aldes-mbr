@@ -3,7 +3,8 @@ Pairing autonome d'une Connect Box Aldes (HF-LPB100) sur ton WiFi local
 en parlant directement le protocole Hi-Flying SmartLink V3.
 
 Usage (PowerShell, en tant qu'utilisateur normal — pas besoin d'admin) :
-    python aldes_pair.py <mot_de_passe_wifi>
+    python aldes_pair.py                 (le mot de passe WiFi est demandé, sans écho)
+    python aldes_pair.py <mot_de_passe>  (déconseillé : reste dans l'historique du shell)
 
 Pré-requis CRUCIAUX :
   1. La Connect Box est en mode pairing (LED clignotante). Si pas le cas,
@@ -17,6 +18,8 @@ Pré-requis CRUCIAUX :
 Le module devine le SSID en sniffant les beacons de l'AP du téléphone/PC.
 On lui balance juste le password encodé via la longueur des paquets.
 """
+import getpass
+import os
 import socket
 import struct
 import sys
@@ -42,7 +45,10 @@ found_modules = {}
 
 
 def get_broadcast_ip():
-    """Determine the local subnet broadcast address."""
+    """Determine the local subnet broadcast address (assumes /24).
+
+    Override with the BROADCAST_IP env var if your LAN is not a /24
+    (or use 255.255.255.255)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -51,7 +57,7 @@ def get_broadcast_ip():
         s.close()
     # Assume /24 subnet (works for 99% of home networks)
     parts = local_ip.split(".")
-    bcast = ".".join(parts[:3] + ["255"])
+    bcast = os.getenv("BROADCAST_IP") or ".".join(parts[:3] + ["255"])
     return local_ip, bcast
 
 
@@ -78,8 +84,8 @@ def connect_loop(sock, dst_ip, password):
 
         # Build content array
         content = [START_MARKER]
-        for ch in password:
-            content.append(ord(ch) + CHAR_OFFSET)
+        for b in password:  # password is UTF-8 bytes
+            content.append(b + CHAR_OFFSET)
         content.append(END_MARKER)
 
         # CONTENT phase: 5 iterations
@@ -146,16 +152,17 @@ def receive_loop(sock):
 
 
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) > 2:
         sys.exit(__doc__)
 
-    password = sys.argv[1]
+    password_str = sys.argv[1] if len(sys.argv) == 2 else getpass.getpass("Mot de passe WiFi : ")
+    password = password_str.encode("utf-8")
     if len(password) < 1:
         sys.exit("Le mot de passe ne peut pas être vide.")
 
     local_ip, bcast_ip = get_broadcast_ip()
     print(f"[init] PC IP: {local_ip}, broadcast: {bcast_ip}", flush=True)
-    print(f"[init] WiFi password length: {len(password)} chars", flush=True)
+    print(f"[init] WiFi password length: {len(password)} bytes", flush=True)
     print(f"[init] HF-LPB100 will pick up SSID from your PC's current WiFi association", flush=True)
     print(f"[init] Make sure you're connected to the TARGET 2.4 GHz WiFi.", flush=True)
 
@@ -180,6 +187,7 @@ def main():
 
     # Wait until paired or 5 min timeout
     start = time.time()
+    next_status = 10
     try:
         while time.time() - start < 300:
             if found_modules:
@@ -187,8 +195,10 @@ def main():
                 time.sleep(3)
                 break
             time.sleep(1)
-            if int(time.time() - start) % 10 == 0:
-                print(f"[wait] {int(time.time() - start)} s — modules found: {len(found_modules)}", flush=True)
+            elapsed = time.time() - start
+            if elapsed >= next_status:
+                print(f"[wait] {int(elapsed)} s — modules found: {len(found_modules)}", flush=True)
+                next_status += 10
     except KeyboardInterrupt:
         print("\n[abort] interrupted by user")
     finally:
@@ -200,14 +210,14 @@ def main():
         for mac, ip in found_modules.items():
             print(f"  module mac={mac}  ip={ip}")
         print("\nLa Connect Box devrait maintenant être joignable.")
-        print("Vérifie avec :  python aldes_ctl.py status   (lecture cloud)")
+        print("Note son adresse MAC : c'est la valeur DEVICE_MAC du docker-compose.")
     else:
         print("\n=== TIMEOUT ===")
         print("Aucun module n'a répondu. Causes possibles :")
         print("  - Le PC n'est pas en WiFi 2.4 GHz")
         print("  - La box n'est pas en mode pairing (LED clignotante ?)")
         print("  - Pare-feu Windows qui bloque le broadcast UDP")
-        print("  - Le mot de passe contient des caractères non-ASCII")
+        print("  - Le réseau n'est pas en /24 (essaie BROADCAST_IP=255.255.255.255)")
         sys.exit(1)
 
 

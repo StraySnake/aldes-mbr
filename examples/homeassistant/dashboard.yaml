@@ -8,8 +8,8 @@
 #   sensor.<DEVICE_NAME_slug>_vitesse_demandee
 #   sensor.<DEVICE_NAME_slug>_puissance_echangeur
 #
-# If you used the default DEVICE_NAME ("Aldes VMC") and DEVICE_MODEL ("Dee Fly Cube"),
-# slugs are: aldes_vmc_dee_fly_cube_*
+# HA builds entity IDs from the device NAME (not the model). With the default
+# DEVICE_NAME ("Aldes VMC"), slugs are: aldes_vmc_*
 #
 # Adjust entity prefixes below if your slug is different.
 
@@ -26,7 +26,7 @@
     rows: auto
   cards:
     - type: tile
-      entity: select.aldes_vmc_dee_fly_cube_mode
+      entity: select.aldes_vmc_mode
       name: Mode
       icon: mdi:fan-clock
       vertical: false
@@ -35,25 +35,25 @@
       features_position: bottom
 
     - type: tile
-      entity: sensor.aldes_vmc_dee_fly_cube_air_interieur_extrait
+      entity: sensor.aldes_vmc_air_interieur_extrait
       name: Indoor
 
     - type: tile
-      entity: sensor.aldes_vmc_dee_fly_cube_air_exterieur
+      entity: sensor.aldes_vmc_air_exterieur
       name: Outdoor
 
     - type: tile
-      entity: sensor.aldes_vmc_dee_fly_cube_air_rejete
+      entity: sensor.aldes_vmc_air_rejete
       name: Reject
 
     - type: tile
-      entity: sensor.aldes_vmc_dee_fly_cube_debit_extraction
+      entity: sensor.aldes_vmc_debit_extraction
       name: Flow
 
     - type: tile
-      entity: sensor.aldes_vmc_dee_fly_cube_vitesse_demandee
+      entity: sensor.aldes_vmc_vitesse_demandee
       name: Set speed
 
     - type: tile
-      entity: sensor.aldes_vmc_dee_fly_cube_puissance_echangeur
+      entity: sensor.aldes_vmc_puissance_echangeur
       name: Exchanger
