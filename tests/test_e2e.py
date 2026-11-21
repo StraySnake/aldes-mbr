@@ -284,8 +284,8 @@ def discovery(mqtt_port):
     from conftest import Recorder
     rec = Recorder(mqtt_port, "disco-reader")
     rec.client.subscribe("homeassistant/#", qos=1)
-    # 25 sensors + 1 select + 9 buttons
-    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 35)
+    # 25 sensors + 1 binary sensor + 1 select + 9 buttons
+    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 36)
     rec.close()
     return {t: json.loads(rec.last(t)) for t in rec.msgs if t.startswith("homeassistant/") and rec.last(t)}
 
@@ -567,3 +567,59 @@ def test_full_frame_logged_in_debug(start_bridge):
     box.publish(EVENTS, json.dumps(frame).encode())
     assert wait(lambda: '"current_mode": "V"' in bridge.log())
     box.close()
+
+
+# ---------- box clock ----------
+
+CLOCK = "aldes/vmc/box_clock"
+UNSET_CLOCK_SE = 1478918800  # what a real box signs right after boot: November 2016
+
+
+def box_clock(mqtt_client):
+    last = mqtt_client.last(CLOCK)
+    return json.loads(last) if last else {}
+
+
+def test_box_clock_set_reported(bridge, box, mqtt_client):
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    assert "box clock: set" in bridge.log()
+
+
+def test_box_clock_not_set_refuses_holidays_only(start_bridge, mqtt_client):
+    bridge = start_bridge({"CMD_CONFIRM_GRACE": "0.2"})
+    box = FakeBox(bridge.port, se=UNSET_CLOCK_SE)
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is False)
+    assert box_clock(mqtt_client)["token_expiry"].startswith("2016-11-12")
+    assert "box clock NOT SET" in bridge.log() and "61.164.36.105" in bridge.log()
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: result(mqtt_client).get("status") == "clock_not_set")
+    time.sleep(0.5)
+    assert not box.received('"W')  # not sent: the box would ignore it
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")  # other commands still work
+    assert wait(lambda: box.received('"X"'))
+    box.close()
+
+
+def test_box_clock_updated_on_reconnect(start_bridge, mqtt_client):
+    bridge = start_bridge()
+    box = FakeBox(bridge.port, se=UNSET_CLOCK_SE)
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is False)
+    box2 = FakeBox(bridge.port)  # reconnects once NTP answered
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: box2.received('"W2'))
+    box.close()
+    box2.close()
+
+
+def test_intruder_does_not_change_box_clock(bridge, box, mqtt_client):
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    intruder = FakeBox(bridge.port, cid="intruder", se=UNSET_CLOCK_SE)
+    time.sleep(1)
+    assert box_clock(mqtt_client)["synced"] is True
+    intruder.close()
+
+
+def test_box_clock_binary_sensor_discovered(bridge, mqtt_port):
+    cfg = discovery(mqtt_port)["homeassistant/binary_sensor/aldes_vmc_AABBCCDDEEFF/box_clock/config"]
+    assert cfg["device_class"] == "problem" and cfg["state_topic"] == CLOCK

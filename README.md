@@ -70,7 +70,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    docker compose up -d --build
    docker compose logs -f
    ```
-   The first lines show the version you run: `HA discovery: 19 sensors + 1 select + 9 buttons`.
+   The first lines show the version you run: `HA discovery: 25 sensors + 1 binary sensor + 1 select + 9 buttons`.
 
 5. **Wait for the box to reconnect** (a few minutes, or power-cycle it). You should see in the logs:
    ```
@@ -85,7 +85,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 6. **Check the box's clock** (see [Box clock (NTP)](#box-clock-ntp)): the date of the `se=` value in the `password` line must be today's date, not 2016.
 
-7. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Other entities: **Début / Fin des vacances** (published by the bridge when holidays start, since the box does not report them), **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
+7. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Diagnostic entities: **Horloge de la box** (*Problème* while the box's clock is not set, see [Box clock (NTP)](#box-clock-ntp)), *Firmware WiFi* shown as its build date, and six **Champ … (inconnu)** sensors for telemetry fields not identified yet (`ff_cpt`, `dep_ind`, `dtb_ind`, `cve_csn`, `vi_csn`, `tte_csn`), disabled by default: enable them to help identify them. *CO₂*, *PM2.5*, *COV* (0 without the optional probes) and *Signal WiFi* are disabled by default too. Other entities: **Début / Fin des vacances** (published by the bridge when holidays start, since the box does not report them), **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
 
 8. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
 
@@ -169,7 +169,9 @@ date -u -d @<value>
 - **2016**: the box has not set its clock yet (still blocked, or not reconnected since).
 - **Today's date** (expiry ahead by some hours): the clock is set. Holidays now start within seconds (*Confirmée*, *Début / Fin des vacances* shown in HA).
 
-The box goes back to 2016 after every power cut and sets its clock again as soon as NTP answers, so keep the rule in place.
+The bridge does this check for you at every connection of the box: the **Horloge de la box** entity in Home Assistant shows *Problème* while the clock is not set, and the log says `box clock NOT SET`. Meanwhile, holiday commands are not sent (*Dernière commande*: *Refusée : horloge de la box non réglée*) since the box would ignore them; other modes work normally. The state is only updated when the box connects: after fixing NTP, wait for its next reconnection or power-cycle it.
+
+The box goes back to 2016 after every power cut and sets its clock again as soon as NTP answers, so keep the rule in place. A useful automation: notify when *Horloge de la box* turns to *Problème*.
 
 ## Security
 

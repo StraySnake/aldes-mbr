@@ -153,6 +153,8 @@ CMD_RESULT_TOPIC = f"{PREFIX}/command_result"
 # Current holiday range (retained JSON {"start", "end"}, ISO 8601; {} when none). Published
 # by the bridge: the box leaves Start_date_mode / End_date_mode empty, even in mode W.
 HOLIDAY_TOPIC = f"{PREFIX}/holiday"
+# Whether the box's clock is set (retained JSON, see clock.py).
+CLOCK_TOPIC = f"{PREFIX}/box_clock"
 # The box's telemetry topic, as published by the box (without our prefix).
 BOX_EVENTS = f"devices/{DEVICE_ID}/messages/events/"
 

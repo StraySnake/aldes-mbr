@@ -1,7 +1,7 @@
 """Home Assistant MQTT discovery."""
 import json
 from .config import (
-    CMD_RESULT_TOPIC, DEVICE_MAC, DEVICE_MODEL, DEVICE_NAME, EVENTS_TOPIC, HA_DISCO_PREFIX,
+    CLOCK_TOPIC, CMD_RESULT_TOPIC, DEVICE_MAC, DEVICE_MODEL, DEVICE_NAME, EVENTS_TOPIC, HA_DISCO_PREFIX,
     HOLIDAY_TOPIC, LAST_SEEN_TOPIC, PREFIX, SENSOR_EXPIRE_AFTER, STATUS_TOPIC,
 )
 from .logs import log
@@ -142,6 +142,24 @@ def publish_ha_discovery(client):
         qos=1, retain=True,
     )
 
+    # Box clock (from its SAS token, see clock.py). device_class problem: "Problème" while
+    # the clock is not set (holidays and the schedule cannot work), "OK" otherwise.
+    client.publish(
+        f"{HA_DISCO_PREFIX}/binary_sensor/{base_id}/box_clock/config",
+        json.dumps({
+            "name": "Horloge de la box",
+            "unique_id": f"{base_id}_box_clock",
+            "state_topic": CLOCK_TOPIC,
+            "value_template": "{{ 'OFF' if value_json.synced else 'ON' }}",
+            "json_attributes_topic": CLOCK_TOPIC,
+            "device_class": "problem",
+            "entity_category": "diagnostic",
+            "icon": "mdi:clock-alert-outline",
+            "device": DEVICE_BLOCK,
+        }),
+        qos=1, retain=True,
+    )
+
     # Last frame received from the box. No availability on purpose: it is most useful
     # precisely when the box is offline ("silent since ...").
     client.publish(
@@ -213,4 +231,4 @@ def publish_ha_discovery(client):
         )
 
     n_sensors = len(SENSORS) + len(UNKNOWN_FIELDS) + 4
-    log(f"HA discovery: {n_sensors} sensors + 1 select + {len(macros)} buttons")
+    log(f"HA discovery: {n_sensors} sensors + 1 binary sensor + 1 select + {len(macros)} buttons")
