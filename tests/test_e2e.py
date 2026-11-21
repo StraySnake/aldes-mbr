@@ -411,12 +411,14 @@ def test_newer_command_replaces_pending_one(cmd_box, mqtt_client):
 def test_unverifiable_command_reported_as_sent(cmd_box, mqtt_client):
     bridge, box = cmd_box
     n = len(statuses(mqtt_client))
-    mqtt_client.publish("aldes/vmc/cmd/macro/programme", "1")
-    assert wait(lambda: statuses(mqtt_client)[n:][:1] == ["sent"])  # then "received" (PUBACK)
     mqtt_client.publish("aldes/vmc/cmd/macro/override_on", "1")
     assert wait(lambda: box.received('"changeCMO"'))
+    assert wait(lambda: statuses(mqtt_client)[n:][:1] == ["sent"])  # then "received" (PUBACK)
     assert wait(lambda: result(mqtt_client).get("command") == "override_on")
     assert wait(lambda: result(mqtt_client)["status"] == "received")
+    report_mode(box, "V")  # a frame does not change anything for an override command
+    time.sleep(0.5)
+    assert result(mqtt_client)["status"] == "received"
 
 
 def test_command_unconfirmed_after_timeout(start_bridge, mqtt_client):
@@ -472,14 +474,14 @@ def test_real_box_with_qos1_gets_the_whole_command(start_bridge, mqtt_client):
     box.close()
 
 
-def test_programme_acknowledged_and_reported_mode_recorded(cmd_box, mqtt_client):
+def test_programme_confirmed_by_telemetry(cmd_box, mqtt_client):
+    # Real box: after changeMode Z, current_mode is "Z" (not the scheduled mode).
     bridge, box = cmd_box
     mqtt_client.publish("aldes/vmc/cmd/macro/programme", "1")
     assert wait(lambda: result(mqtt_client).get("status") == "received")
-    report_mode(box, "V")  # what the box reports in Programme mode, whatever it is
-    assert wait(lambda: result(mqtt_client).get("reported_mode") == "V")
-    assert result(mqtt_client)["status"] == "received"
-    assert "box reports V" in bridge.log()
+    report_mode(box, "Z")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    assert result(mqtt_client)["expected_mode"] == "Z"
 
 
 def test_without_puback_still_confirmed_by_telemetry(start_bridge, mqtt_client):

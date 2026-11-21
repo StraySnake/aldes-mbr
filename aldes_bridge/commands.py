@@ -35,7 +35,7 @@ def is_mode_change(payload):
 
 def expected_mode(payload):
     """What current_mode should become after this command: ("is", code), ("not", code),
-    or None when the telemetry cannot tell (Programme, changeCMO, unknown payloads)."""
+    or None when the telemetry cannot tell (changeCMO, unknown payloads)."""
     try:
         cmd = json.loads(payload)
         param = cmd["params"][0]
@@ -46,9 +46,9 @@ def expected_mode(payload):
     if param == _HOLIDAY_STOP:
         return ("not", "W")
     code = param[0]
-    if code not in MODES or code == "Z":
-        # Z: in Programme mode the box may report the scheduled mode, not "Z" (unverified).
+    if code not in MODES:
         return None
+    # Z (Programme) included: a real box reports current_mode "Z", not the scheduled mode.
     return ("is", code)
 
 

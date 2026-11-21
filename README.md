@@ -108,7 +108,7 @@ The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that transl
 
 ### Command confirmation
 
-Commands are sent with MQTT QoS 1: the box acknowledges each one (PUBACK), shown as *Reçue par la box*. For mode changes, the bridge then checks the next telemetry frame: if the box still reports the old mode, the command is sent once more, then reported as failed. The outcome is published (retained) on `aldes/vmc/command_result` and shown by the **Dernière commande** sensor: *En attente*, *Reçue par la box*, *Confirmée*, *Renvoyée*, *Échec*, *Non confirmée* (no telemetry within `CMD_CONFIRM_TIMEOUT`, 15 min by default), *Envoyée* (not verifiable by the telemetry: Programme, override), *Box déconnectée*. The attributes give the command, the expected and the reported mode (also recorded for Programme).
+Commands are sent with MQTT QoS 1: the box acknowledges each one (PUBACK), shown as *Reçue par la box*. For mode changes, the bridge then checks the next telemetry frame: if the box still reports the old mode, the command is sent once more, then reported as failed. The outcome is published (retained) on `aldes/vmc/command_result` and shown by the **Dernière commande** sensor: *En attente*, *Reçue par la box*, *Confirmée*, *Renvoyée*, *Échec*, *Non confirmée* (no telemetry within `CMD_CONFIRM_TIMEOUT`, 15 min by default), *Envoyée* (not verifiable by the telemetry: override), *Box déconnectée*. The attributes give the command, the expected and the reported mode.
 
 The box sends a telemetry frame about 5 s after each command, so a mode change is normally confirmed within seconds.
 
