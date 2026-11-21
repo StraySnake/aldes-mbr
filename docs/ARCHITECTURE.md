@@ -58,9 +58,10 @@ The HF-LPB100 firmware in the Aldes Connect Box has a few oversights that make t
 ### `fake_iothub.py`
 
 - **`gen_cert()`**: creates a self-signed TLS cert with CN=`aldesiotsuite.azure-devices.net` and SAN=`*.azure-devices.net`. Stored in `/data/` for persistence across container restarts.
-- **MQTT 3.1.1 codec**: minimal hand-rolled parser. Only the packet types we care about (CONNECT, PUBLISH, SUBSCRIBE, PUBACK, PINGREQ, DISCONNECT). No retained message handling, no QoS 2 — the box doesn't need them.
-- **`UpstreamBridge`**: paho-mqtt client connected to user's Mosquitto. Republishes telemetry as retained, listens for `aldes/vmc/cmd/#` for command injection.
-- **`publish_ha_discovery()`**: at startup, publishes ~17 retained config messages on `homeassistant/{sensor,select,button}/aldes_vmc_<MAC>/<id>/config`. HA auto-creates the entities.
+- **MQTT 3.1.1 codec**: minimal hand-rolled parser. Only the packet types we care about (CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, PUBACK, PINGREQ, DISCONNECT). No retained message handling, no QoS 2 — the box doesn't need them. Packets larger than 64 kB and a second CONNECT on the same connection close the connection.
+- **Box sessions**: one thread per connection, which does *all* the TLS reads and writes (OpenSSL does not support two threads using one SSL object at once). Commands coming from Mosquitto are queued and sent by the connection thread within 0.2 s. A connection is closed after 1.5× its MQTT keepalive without traffic; a new connection with the same `client_id` replaces the previous one.
+- **`UpstreamBridge`**: paho-mqtt client connected to user's Mosquitto (reconnects automatically). Republishes telemetry as retained, listens for `aldes/vmc/cmd/#` for command injection — **retained messages on that topic are ignored**, otherwise they would be replayed to the box on every reconnect. Publishes `aldes/vmc/status` (`online`/`offline`, with an LWT) for HA availability.
+- **`publish_ha_discovery()`**: on every connection to Mosquitto, publishes ~23 retained config messages on `homeassistant/{sensor,select,button}/aldes_vmc_<MAC>/<id>/config`. HA auto-creates the entities.
 - **`_macro_payload()`**: translates high-level macros (`vacances1j`, `boost`, etc.) to the actual Aldes JSON-RPC payload, including computing UTC date strings for holiday mode.
 
 ### `network_mode: host`

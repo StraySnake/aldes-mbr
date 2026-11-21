@@ -106,6 +106,8 @@ The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that transl
 | `programme` / `z` | mode Z (schedule) |
 | `override_on` / `override_off` | `changeCMO 1` / `changeCMO 0` |
 
+Publish commands with `retain=false`: retained messages on `aldes/vmc/cmd/#` are ignored (they would otherwise be replayed to the box every time the bridge reconnects).
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — full data flow

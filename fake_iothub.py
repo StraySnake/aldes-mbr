@@ -26,7 +26,8 @@ Env vars:
   LOG_MAX_BYTES          rotate LOG_FILE above this size (default: 5 MB, 0 = no rotation)
   LOG_BACKUPS            number of rotated log files kept (default: 3)
 """
-import json, os, re, signal, socket, ssl, struct, sys, threading, warnings
+import json, os, re, signal, socket, ssl, struct, sys, threading, time, warnings
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -68,6 +69,10 @@ PORT = 8883
 # Timeouts (seconds)
 HANDSHAKE_TIMEOUT = 30      # TLS handshake + first CONNECT packet
 DEFAULT_KEEPALIVE = 180     # used when the box announces keepalive=0
+# The box sends ~1 kB telemetry frames; refuse anything absurd instead of buffering it.
+MAX_PACKET_SIZE = 64 * 1024
+# How often the connection thread checks for commands queued by other threads.
+POLL_INTERVAL = 0.2
 
 
 # ---------- logging ----------
@@ -217,16 +222,46 @@ _sessions_lock = threading.Lock()
 
 
 class Session:
+    """One box connection.
+
+    All TLS I/O happens in the connection's own thread: OpenSSL does not support
+    reading and writing one SSL object from two threads at once. Other threads
+    (paho's, for injected commands) queue their packets; the connection thread
+    sends them within POLL_INTERVAL.
+    """
+
     def __init__(self, sock, addr):
         self.sock = sock
         self.addr = addr
         self.client_id = None
-        self.write_lock = threading.Lock()  # every write to the TLS socket goes through this
         self.subs = []
+        self.owner = threading.get_ident()
+        self._outbox = deque()
 
     def send(self, data):
-        with self.write_lock:
+        if threading.get_ident() == self.owner:
             self.sock.sendall(data)
+        else:
+            self._outbox.append(data)
+
+    def flush(self):
+        """Owner thread only: send packets queued by other threads."""
+        while self._outbox:
+            self.sock.sendall(self._outbox.popleft())
+
+    def kill(self):
+        """Any thread: abort the connection at the TCP level, without touching the SSL
+        object. The owner thread then sees EOF/an error and cleans up."""
+        try:
+            socket.socket.shutdown(self.sock, socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
 
 
 def box_online():
@@ -252,6 +287,7 @@ class UpstreamBridge:
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
         self.cmd_callbacks = []  # list of fn(topic, payload) called when user injects a cmd
+        self._status_lock = threading.Lock()  # keeps "compute status" + "publish" atomic
         # connect_async + loop_start: paho keeps retrying in the background, so the bridge
         # comes up even if Mosquitto starts after us (e.g. NAS boot).
         self.client.connect_async(UPSTREAM_HOST, UPSTREAM_PORT, keepalive=60)
@@ -272,6 +308,12 @@ class UpstreamBridge:
         log(f"upstream MQTT disconnected: {reason_code} (will retry)")
 
     def _on_message(self, client, userdata, msg):
+        if msg.retain:
+            # A command published with retain=true would be replayed by Mosquitto at every
+            # (re)connect of the bridge, e.g. restarting holidays after each reboot.
+            log(f"upstream RX cmd topic={msg.topic} IGNORED: retained message "
+                f"(publish commands with retain=false; clear it by publishing an empty retained message)")
+            return
         log(f"upstream RX cmd topic={msg.topic} payload={msg.payload!r}")
         for cb in self.cmd_callbacks:
             try:
@@ -287,14 +329,20 @@ class UpstreamBridge:
             log(f"upstream publish err: {e}")
 
     def publish_status(self):
-        try:
-            self.client.publish(STATUS_TOPIC, "online" if box_online() else "offline", qos=1, retain=True)
-        except Exception as e:
-            log(f"upstream status publish err: {e}")
+        # Under a lock so that a session closing and a session opening at the same time
+        # cannot publish their states in the wrong order (stale "offline" after "online").
+        with self._status_lock:
+            try:
+                self.client.publish(STATUS_TOPIC, "online" if box_online() else "offline",
+                                    qos=1, retain=True)
+            except Exception as e:
+                log(f"upstream status publish err: {e}")
 
     def stop(self):
         try:
-            self.client.publish(STATUS_TOPIC, "offline", qos=1, retain=True).wait_for_publish(2)
+            with self._status_lock:
+                info = self.client.publish(STATUS_TOPIC, "offline", qos=1, retain=True)
+            info.wait_for_publish(2)
         except Exception:
             pass
         self.client.disconnect()
@@ -437,8 +485,8 @@ def send_publish_to_box(client_id, topic, payload):
     body = encode_string(topic) + payload
     pkt = bytes([0x30]) + encode_remaining_length(len(body)) + body
     try:
-        sess.send(pkt)
-        log(f"inject: sent to {client_id} topic={topic} ({len(payload)} bytes)")
+        sess.send(pkt)  # queued, written by the session's own thread
+        log(f"inject: queued for {client_id} topic={topic} ({len(payload)} bytes)")
         return True
     except Exception as e:
         log(f"inject err: {e}")
@@ -466,17 +514,40 @@ def handle_client(raw_sock, addr):
         tls_sock = ctx.wrap_socket(raw_sock, server_side=True, do_handshake_on_connect=False)
         tls_sock.do_handshake()
         sess = Session(tls_sock, addr)
+        idle_timeout = HANDSHAKE_TIMEOUT  # until CONNECT, then 1.5x keepalive
+        last_rx = time.monotonic()
 
         while True:
-            head = tls_sock.recv(1)
+            tls_sock.settimeout(idle_timeout)
+            sess.flush()
+            # Short recv timeout to pick up queued commands regularly. Not select():
+            # OpenSSL may already hold the next record in memory (e.g. CONNECT read
+            # together with the handshake), and select() would not see it.
+            tls_sock.settimeout(POLL_INTERVAL)
+            try:
+                head = tls_sock.recv(1)
+            except socket.timeout:
+                if time.monotonic() - last_rx > idle_timeout:
+                    raise
+                continue
             if not head:
                 break
+            tls_sock.settimeout(idle_timeout)  # bounds a stalled mid-packet read
             ptype = (head[0] >> 4) & 0xF
             flags = head[0] & 0xF
             length = read_remaining_length(tls_sock)
+            if length > MAX_PACKET_SIZE:
+                raise ValueError(f"packet too large ({length} bytes, max {MAX_PACKET_SIZE})")
             payload = recv_exact(tls_sock, length)
+            last_rx = time.monotonic()
 
-            if ptype == CONNECT:
+            if ptype == CONNECT and sess.client_id is not None:
+                # MQTT 3.1.1 §3.1: a second CONNECT is a protocol violation -> disconnect.
+                # (Otherwise the first client_id would stay registered on a dead session.)
+                log(f"{addr} second CONNECT on the same connection, closing")
+                break
+
+            elif ptype == CONNECT:
                 proto, off = parse_string(payload, 0)
                 level = payload[off]; off += 1
                 cflags = payload[off]; off += 1
@@ -502,7 +573,8 @@ def handle_client(raw_sock, addr):
                     log(f"{addr}   WARNING: client_id != DEVICE_ID ({DEVICE_ID}); "
                         f"commands will NOT be routed to this client. Check DEVICE_MAC / DEVICE_ID.")
                 # MQTT spec: close the connection if nothing is received within 1.5x keepalive.
-                tls_sock.settimeout((keepalive or DEFAULT_KEEPALIVE) * 1.5)
+                idle_timeout = (keepalive or DEFAULT_KEEPALIVE) * 1.5
+                tls_sock.settimeout(idle_timeout)
                 sess.client_id = cid
                 with _sessions_lock:
                     old = sessions.get(cid)
@@ -510,10 +582,7 @@ def handle_client(raw_sock, addr):
                 if old is not None:
                     # Same box reconnected: drop the stale (half-open) socket.
                     log(f"{addr}   replacing previous session from {old.addr}")
-                    try:
-                        old.sock.shutdown(socket.SHUT_RDWR)
-                    except Exception:
-                        pass
+                    old.kill()
                 # Reply CONNACK accepted (session_present=0, return_code=0)
                 sess.send(bytes([0x20, 0x02, 0x00, 0x00]))
                 if bridge:
@@ -582,10 +651,13 @@ def handle_client(raw_sock, addr):
     except Exception as e:
         log(f"{addr} error: {type(e).__name__}: {e}")
     finally:
-        try:
-            (tls_sock or raw_sock).close()
-        except Exception:
-            pass
+        if sess:
+            sess.close()
+        else:
+            try:
+                (tls_sock or raw_sock).close()
+            except Exception:
+                pass
         if sess and _unregister(sess) and bridge:
             bridge.publish_status()
         log(f"{addr} closed (client_id={sess.client_id if sess else None})")
@@ -639,6 +711,11 @@ def cmd_callback(topic, payload):
     if not topic.startswith(f"{PREFIX}/cmd/"):
         return
     relative = topic[len(f"{PREFIX}/cmd/"):]
+    if not payload:
+        # Clearing a retained message publishes an empty payload: it must not trigger
+        # the macro (macros are chosen by topic name, the payload is not used).
+        log(f"cmd: empty payload on {topic}, ignored")
+        return
 
     # Macro mode:
     #   aldes/vmc/cmd/macro/<name>           -> use <name>
@@ -688,16 +765,15 @@ def _build_ssl_context():
 ctx = None
 
 
-def _shutdown(signum, frame):
-    log(f"signal {signum} received, shutting down")
-    if bridge:
-        bridge.stop()
-    sys.exit(0)
+def _on_sigterm(signum, frame):
+    # Only raise here: log() and paho take locks that the interrupted main thread
+    # might be holding. The cleanup runs in main()'s finally block instead.
+    raise SystemExit(0)
 
 
 def main():
     global bridge, ctx
-    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     gen_cert()
     ctx = _build_ssl_context()
     try:
@@ -714,15 +790,22 @@ def main():
     log(f"bridging captured PUBLISHes to mqtt://{UPSTREAM_HOST}:{UPSTREAM_PORT} prefix={PREFIX}")
     log(f"expecting box client_id={DEVICE_ID}")
 
-    while True:
-        try:
-            client, addr = sock.accept()
-        except OSError as e:
-            log(f"accept err: {e}")
-            continue
-        # TLS handshake happens in the worker thread so a slow/broken client can't
-        # block the accept loop (or crash it with a non-SSL exception).
-        threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+    try:
+        while True:
+            try:
+                client, addr = sock.accept()
+            except OSError as e:
+                log(f"accept err: {e}")
+                continue
+            # TLS handshake happens in the worker thread so a slow/broken client can't
+            # block the accept loop (or crash it with a non-SSL exception).
+            threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+    except KeyboardInterrupt:
+        pass  # Ctrl+C: same clean shutdown as SIGTERM
+    finally:
+        log("shutting down")
+        if bridge:
+            bridge.stop()  # publishes "offline" so HA marks the entities unavailable
 
 
 if __name__ == "__main__":
