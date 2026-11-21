@@ -18,6 +18,8 @@ Env vars:
   DEVICE_MAC             REQUIRED. The HF-LPB100 module MAC (12 hex chars, ':' or '-' OK)
   DEVICE_NAME            HA device name (default: "Aldes VMC")
   DEVICE_MODEL           HA device model (default: "Dee Fly Cube")
+  DEVICE_IP              optional. Only accept connections from this IP (comma-separated
+                         list allowed). Reserve the box's IP in your DHCP server first.
   UPSTREAM_MQTT_PORT     bridge port (default: 1883)
   UPSTREAM_MQTT_USER     optional auth
   UPSTREAM_MQTT_PASS     optional auth
@@ -26,7 +28,7 @@ Env vars:
   LOG_MAX_BYTES          rotate LOG_FILE above this size (default: 5 MB, 0 = no rotation)
   LOG_BACKUPS            number of rotated log files kept (default: 3)
 """
-import json, os, re, signal, socket, ssl, struct, sys, threading, time, warnings
+import ipaddress, json, os, re, signal, socket, ssl, struct, sys, threading, time, warnings
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -58,7 +60,27 @@ DEVICE_NAME = os.getenv("DEVICE_NAME", "Aldes VMC")
 DEVICE_MODEL = os.getenv("DEVICE_MODEL", "Dee Fly Cube")
 HA_DISCO_PREFIX = os.getenv("HA_DISCOVERY_PREFIX", "homeassistant")
 
+
+def _parse_allowed_ips(raw):
+    ips = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ips.add(str(ipaddress.ip_address(part)))
+        except ValueError:
+            sys.exit(f"FATAL: DEVICE_IP contains an invalid IP address: {part!r}")
+    return ips
+
+
+# Empty set = accept any client (default). The broker does not authenticate the box
+# otherwise: the SAS token is signed with an Aldes key we do not have.
+ALLOWED_IPS = _parse_allowed_ips(os.getenv("DEVICE_IP", ""))
+
 EVENTS_TOPIC = f"{PREFIX}/raw/devices/{DEVICE_ID}/messages/events/"
+# Only PUBLISHes from the box's own session, on its own topics, are relayed to Mosquitto.
+BOX_TOPIC_PREFIX = f"devices/{DEVICE_ID}/"
 CMD_TOPIC = f"{PREFIX}/cmd/devices/{DEVICE_ID}/messages/devicebound"
 # Availability: "online" while the bridge is up AND the box has an active session.
 STATUS_TOPIC = f"{PREFIX}/status"
@@ -541,7 +563,12 @@ def handle_client(raw_sock, addr):
             payload = recv_exact(tls_sock, length)
             last_rx = time.monotonic()
 
-            if ptype == CONNECT and sess.client_id is not None:
+            if sess.client_id is None and ptype != CONNECT:
+                # MQTT 3.1.1 §3.1: the first packet must be CONNECT.
+                log(f"{addr} packet type={ptype} before CONNECT, closing")
+                break
+
+            elif ptype == CONNECT and sess.client_id is not None:
                 # MQTT 3.1.1 §3.1: a second CONNECT is a protocol violation -> disconnect.
                 # (Otherwise the first client_id would stay registered on a dead session.)
                 log(f"{addr} second CONNECT on the same connection, closing")
@@ -604,8 +631,12 @@ def handle_client(raw_sock, addr):
                 elif qos == 2 and pkt_id is not None:
                     # Not expected from the box; acknowledge with PUBREC so it doesn't stall.
                     sess.send(bytes([0x50, 0x02]) + struct.pack(">H", pkt_id))
-                # Bridge to upstream — retain=true so HA has the last value after reloads
-                if bridge:
+                # Bridge to upstream — retain=true so HA has the last value after reloads.
+                # Only the box's own telemetry: another LAN client must not be able to
+                # inject values into HA or fill Mosquitto with retained topics.
+                if sess.client_id != DEVICE_ID or not topic.startswith(BOX_TOPIC_PREFIX):
+                    log(f"{addr}   not relayed (only {BOX_TOPIC_PREFIX}... from client_id {DEVICE_ID})")
+                elif bridge:
                     bridge.publish(f"raw/{topic.replace('$', '_').replace('#', '_').replace('+', '_')}",
                                    msg, retain=True)
 
@@ -764,6 +795,19 @@ def _build_ssl_context():
 
 ctx = None
 
+_rejected_log = {}  # ip -> last time a rejection was logged (avoid flooding the log)
+
+
+def _ip_allowed(ip):
+    if not ALLOWED_IPS or ip in ALLOWED_IPS:
+        return True
+    now = time.monotonic()
+    if now - _rejected_log.get(ip, -1e9) > 60:
+        _rejected_log[ip] = now
+        log(f"connection from {ip} REFUSED: not in DEVICE_IP ({', '.join(sorted(ALLOWED_IPS))})"
+            f" (logged at most once a minute per IP)")
+    return False
+
 
 def _on_sigterm(signum, frame):
     # Only raise here: log() and paho take locks that the interrupted main thread
@@ -789,6 +833,10 @@ def main():
     log(f"fake Azure IoT Hub listening on {HOST}:{PORT} (TLS, CN={SERVER_CN})")
     log(f"bridging captured PUBLISHes to mqtt://{UPSTREAM_HOST}:{UPSTREAM_PORT} prefix={PREFIX}")
     log(f"expecting box client_id={DEVICE_ID}")
+    if ALLOWED_IPS:
+        log(f"accepting connections only from {', '.join(sorted(ALLOWED_IPS))}")
+    else:
+        log("accepting connections from any IP (set DEVICE_IP to restrict)")
 
     try:
         while True:
@@ -796,6 +844,9 @@ def main():
                 client, addr = sock.accept()
             except OSError as e:
                 log(f"accept err: {e}")
+                continue
+            if not _ip_allowed(addr[0]):
+                client.close()  # before TLS: costs nothing, reveals nothing
                 continue
             # TLS handshake happens in the worker thread so a slow/broken client can't
             # block the accept loop (or crash it with a non-SSL exception).
