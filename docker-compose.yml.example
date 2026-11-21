@@ -54,6 +54,10 @@ services:
       # === Home Assistant MQTT discovery prefix ===
       HA_DISCOVERY_PREFIX: "homeassistant"
 
+      # === Home Assistant behaviour ===
+      # SENSOR_EXPIRE_AFTER: "900"   # sensors unavailable after 15 min without telemetry (0 = never)
+      # CMD_CONFIRM_TIMEOUT: "900"   # max wait for a frame confirming a mode change
+
       LOG_FILE: "/logs/mitm.log"
       # LOG_MAX_BYTES: "5242880"   # rotate mitm.log above 5 MB (0 = never)
       # LOG_BACKUPS: "3"
