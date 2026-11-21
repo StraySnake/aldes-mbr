@@ -296,7 +296,7 @@ def test_discovery_expire_after_holiday_and_buttons(bridge, mqtt_port):
     assert "expire_after" not in cfgs[f"{base}/last_seen/config"]
     for obj in ("holiday_start", "holiday_end"):
         cfg = cfgs[f"{base}/{obj}/config"]
-        assert cfg["device_class"] == "timestamp" and "_date_mode" in cfg["value_template"]
+        assert cfg["device_class"] == "timestamp" and cfg["state_topic"] == "aldes/vmc/holiday"
     assert cfgs[f"{base}/last_command/config"]["state_topic"] == "aldes/vmc/command_result"
     btn = "homeassistant/button/aldes_vmc_AABBCCDDEEFF"
     assert cfgs[f"{btn}/btn_override_on/config"]["command_topic"] == "aldes/vmc/cmd/macro/override_on"
@@ -390,13 +390,57 @@ def test_frame_within_grace_period_ignored(start_bridge, mqtt_client):
     box.close()
 
 
-def test_holiday_stop_confirmed_when_mode_leaves_w(cmd_box, mqtt_client):
+HOLIDAY = "aldes/vmc/holiday"
+
+
+def holiday(mqtt_client):
+    last = mqtt_client.last(HOLIDAY)
+    return json.loads(last) if last else None
+
+
+def test_holiday_range_published_then_cleared(cmd_box, mqtt_client):
+    from datetime import datetime, timezone
     bridge, box = cmd_box
-    mqtt_client.publish("aldes/vmc/cmd/macro/vacances_stop", "1")
-    assert wait(lambda: box.received("00010101000000Z"))
     report_mode(box, "V")
+    assert wait(lambda: holiday(mqtt_client) == {})  # no holidays
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances7j", "1")
+    assert wait(lambda: box.received('"W2'))
+    report_mode(box, "W")  # the box enters holidays (and leaves the dates empty)
     assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
-    assert result(mqtt_client)["expected_mode"] == "!W"
+    assert wait(lambda: (holiday(mqtt_client) or {}).get("end"))
+    rng = holiday(mqtt_client)
+    start, end = (datetime.fromisoformat(rng[k]) for k in ("start", "end"))
+    assert (end - start).days == 7 and start < datetime.now(timezone.utc)
+    report_mode(box, "V")  # holidays over (ended or cancelled)
+    assert wait(lambda: holiday(mqtt_client) == {})
+
+
+def test_holiday_range_not_published_if_not_applied(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: box.received('"W2'))
+    report_mode(box, "V")  # wrong clock: holidays acknowledged but not applied
+    assert wait(lambda: result(mqtt_client).get("status") == "retrying")
+    report_mode(box, "V")
+    assert wait(lambda: result(mqtt_client).get("status") == "failed")
+    assert not (holiday(mqtt_client) or {}).get("start")
+
+
+def test_holiday_stop_restores_previous_mode(cmd_box, mqtt_client):
+    # A real box ignores the app's cancel command ("W" + 0001-01-01 dates) and stays in W;
+    # switching to another mode ends the holidays.
+    bridge, box = cmd_box
+    report_mode(box, "Y")  # mode before the holidays
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: box.received('"W2'))
+    report_mode(box, "W")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances_stop", "1")
+    assert wait(lambda: box.rx and json.loads(box.rx[-1]) == {"method": "changeMode", "params": ["Y"]})
+    report_mode(box, "Y")
+    assert wait(lambda: result(mqtt_client).get("command") == "vacances_stop"
+                and result(mqtt_client).get("status") == "confirmed")
+    assert not box.received("00010101000000Z")
 
 
 def test_newer_command_replaces_pending_one(cmd_box, mqtt_client):
