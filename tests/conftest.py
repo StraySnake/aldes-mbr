@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -70,9 +71,15 @@ class Recorder:
         self.msgs = {}  # topic -> [(payload str, retain)]
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
         self.client.on_message = self._on_message
+        self._subscribed = threading.Event()
+        self.client.on_subscribe = lambda *args: self._subscribed.set()
         self.client.connect("127.0.0.1", port)
         self.client.subscribe("aldes/vmc/#", qos=1)
         self.client.loop_start()
+        # connect() only sends CONNECT: wait for CONNACK and SUBACK, otherwise a publish
+        # right after can fail with "not currently connected" on a busy CI runner.
+        assert wait(self.client.is_connected, 10), f"{client_id}: no CONNACK from the broker"
+        assert self._subscribed.wait(10), f"{client_id}: no SUBACK from the broker"
 
     def _on_message(self, client, userdata, msg):
         self.msgs.setdefault(msg.topic, []).append((msg.payload.decode(errors="replace"), msg.retain))
