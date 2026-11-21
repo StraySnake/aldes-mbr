@@ -26,6 +26,10 @@ Env vars:
   UPSTREAM_MQTT_PASS     optional auth
   BRIDGE_TOPIC_PREFIX    topic prefix for republished messages (default: aldes/vmc)
   LOG_FILE               additional log file (default: /logs/mitm.log)
+  SENSOR_EXPIRE_AFTER    seconds without a frame from the box before HA marks the sensors
+                         unavailable (default: 900, 0 = never)
+  CMD_CONFIRM_TIMEOUT    seconds to wait for a telemetry frame confirming a mode change
+                         (default: 900)
   LOG_MAX_BYTES          rotate LOG_FILE above this size (default: 5 MB, 0 = no rotation)
   LOG_BACKUPS            number of rotated log files kept (default: 3)
 """
@@ -49,6 +53,11 @@ PREFIX = os.getenv("BRIDGE_TOPIC_PREFIX", "aldes/vmc")
 LOG_FILE = os.getenv("LOG_FILE", "/logs/mitm.log")
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
 LOG_BACKUPS = int(os.getenv("LOG_BACKUPS", "3"))
+SENSOR_EXPIRE_AFTER = int(os.getenv("SENSOR_EXPIRE_AFTER", "900"))
+CMD_CONFIRM_TIMEOUT = float(os.getenv("CMD_CONFIRM_TIMEOUT", "900"))
+# Frames received this soon after a command may have been sampled before the box
+# applied it: they neither confirm nor refute it.
+CMD_CONFIRM_GRACE = float(os.getenv("CMD_CONFIRM_GRACE", "3"))
 
 # Device identity — DEVICE_MAC is REQUIRED
 _DEVICE_MAC_RAW = os.getenv("DEVICE_MAC", "").upper().replace(":", "").replace("-", "")
@@ -87,6 +96,9 @@ CMD_TOPIC = f"{PREFIX}/cmd/devices/{DEVICE_ID}/messages/devicebound"
 STATUS_TOPIC = f"{PREFIX}/status"
 # ISO 8601 time of the last frame received from the box (retained).
 LAST_SEEN_TOPIC = f"{PREFIX}/last_seen"
+# Outcome of the last command (retained JSON). Not under <prefix>/cmd/: the bridge
+# subscribes there and would forward it to the box.
+CMD_RESULT_TOPIC = f"{PREFIX}/command_result"
 # The box's telemetry topic, as published by the box (without our prefix).
 BOX_EVENTS = f"devices/{DEVICE_ID}/messages/events/"
 
@@ -494,8 +506,54 @@ def publish_ha_discovery(client):
             **AVAILABILITY,
             **extra,
         }
+        if SENSOR_EXPIRE_AFTER > 0:
+            # Box silent (e.g. half-open connection, not yet detected): show
+            # "unavailable" rather than frozen values.
+            cfg["expire_after"] = SENSOR_EXPIRE_AFTER
         topic = f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
+
+    # Holiday start/end. ASSUMPTION: Start_date_mode / End_date_mode use the same
+    # yyyyMMddHHmmssZ format as the changeMode W command (unverified on a real box);
+    # anything else, "" or the 0001-01-01 placeholder shows as unknown.
+    for obj_id, name, key in (("holiday_start", "Début des vacances", "Start_date_mode"),
+                              ("holiday_end", "Fin des vacances", "End_date_mode")):
+        tpl = (
+            "{% set d = (value_json." + key + " | default('')) | string %}"
+            "{% if d is match('^[0-9]{14}Z?$') and d[0:4] != '0001' %}"
+            "{{ d[0:4] }}-{{ d[4:6] }}-{{ d[6:8] }}T{{ d[8:10] }}:{{ d[10:12] }}:{{ d[12:14] }}+00:00"
+            "{% else %}None{% endif %}"
+        )
+        client.publish(
+            f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config",
+            json.dumps({
+                "name": name,
+                "unique_id": f"{base_id}_{obj_id}",
+                "state_topic": EVENTS_TOPIC,
+                "value_template": tpl,
+                "device_class": "timestamp",
+                "icon": "mdi:bag-suitcase",
+                "device": DEVICE_BLOCK,
+                **AVAILABILITY,
+            }),
+            qos=1, retain=True,
+        )
+
+    # Outcome of the last command (see CommandTracker).
+    labels = json.dumps(CMD_STATUS_LABELS, ensure_ascii=False).replace('"', "'")
+    client.publish(
+        f"{HA_DISCO_PREFIX}/sensor/{base_id}/last_command/config",
+        json.dumps({
+            "name": "Dernière commande",
+            "unique_id": f"{base_id}_last_command",
+            "state_topic": CMD_RESULT_TOPIC,
+            "value_template": "{% set m = " + labels + " %}{{ m.get(value_json.status, value_json.status) }}",
+            "json_attributes_topic": CMD_RESULT_TOPIC,
+            "icon": "mdi:message-check-outline",
+            "device": DEVICE_BLOCK,
+        }),
+        qos=1, retain=True,
+    )
 
     # Last frame received from the box. No availability on purpose: it is most useful
     # precisely when the box is offline ("silent since ...").
@@ -548,6 +606,9 @@ def publish_ha_discovery(client):
         ("vacances7j",    "Vacances 7 jours",  "mdi:bag-suitcase"),
         ("vacances_stop", "Annuler vacances",  "mdi:bag-suitcase-off"),
         ("programme",     "Programme",         "mdi:fan-clock"),
+        # changeCMO: the box does not report this state, hence buttons, not a switch.
+        ("override_on",   "Ignorer le programme", "mdi:calendar-remove"),
+        ("override_off",  "Suivre le programme",  "mdi:calendar-check"),
     ]
     for key, name, icon in macros:
         cfg = {
@@ -564,7 +625,7 @@ def publish_ha_discovery(client):
             json.dumps(cfg), qos=1, retain=True,
         )
 
-    log(f"HA discovery: {len(SENSORS) + 1} sensors + 1 select + {len(macros)} buttons")
+    log(f"HA discovery: {len(SENSORS) + 4} sensors + 1 select + {len(macros)} buttons")
 
 
 # ---------- per-client MQTT handler ----------
@@ -715,6 +776,7 @@ def handle_client(raw_sock, addr):
                         frame = decode_frame(msg)
                         if frame is not None:
                             msg = json.dumps(merge_telemetry(frame), ensure_ascii=False)
+                            commands.on_frame(frame)
                     bridge.publish(f"raw/{topic.replace('$', '_').replace('#', '_').replace('+', '_')}",
                                    msg, retain=True)
                     bridge.publish("last_seen", datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -813,6 +875,121 @@ def _macro_payload(macro):
     return None
 
 
+# ---------- command confirmation ----------
+#
+# Commands go to the box as QoS 0: nothing says it got them. The telemetry does say
+# which mode it is in, so a mode change is confirmed (or not) by the next frames.
+
+CMD_STATUS_LABELS = {
+    "pending": "En attente",
+    "confirmed": "Confirmée",
+    "retrying": "Renvoyée",
+    "failed": "Échec",
+    "unconfirmed": "Non confirmée",
+    "sent": "Envoyée",
+    "not_connected": "Box déconnectée",
+}
+_HOLIDAY_STOP = "W" + "00010101000000Z" * 2
+
+
+def expected_mode(payload):
+    """What current_mode should become after this command: ("is", code), ("not", code),
+    or None when the telemetry cannot tell (Programme, changeCMO, unknown payloads)."""
+    try:
+        cmd = json.loads(payload)
+        param = cmd["params"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+    if cmd.get("method") != "changeMode" or not isinstance(param, str) or not param:
+        return None
+    if param == _HOLIDAY_STOP:
+        return ("not", "W")
+    code = param[0]
+    if code not in MODES or code == "Z":
+        # Z: in Programme mode the box may report the scheduled mode, not "Z" (unverified).
+        return None
+    return ("is", code)
+
+
+class CommandTracker:
+    """Follows the last command sent to the box until the telemetry confirms it.
+    One retry if a frame shows the old mode; a newer command replaces the pending one."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pending = None
+
+    def _publish(self, info, status, reported=None):
+        result = {
+            "command": info["label"],
+            "status": status,
+            "expected_mode": info.get("expected"),
+            "reported_mode": reported,
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        log(f"command '{info['label']}': {status}" + (f" (box reports {reported})" if reported else ""))
+        if bridge:
+            bridge.publish("command_result", json.dumps(result, ensure_ascii=False), qos=1, retain=True)
+
+    def not_connected(self, label):
+        self._publish({"label": label}, "not_connected")
+
+    def sent(self, label, topic, payload):
+        expect = expected_mode(payload)
+        with self._lock:
+            if self._pending:
+                self._pending["timer"].cancel()
+                self._pending = None
+            if expect is None:
+                info = {"label": label}
+            else:
+                info = self._pending = {
+                    "label": label, "topic": topic, "payload": payload,
+                    "expect": expect, "expected": ("!" if expect[0] == "not" else "") + expect[1],
+                    "sent_at": time.monotonic(), "retried": False,
+                }
+                info["timer"] = threading.Timer(CMD_CONFIRM_TIMEOUT, self._timeout, args=(info,))
+                info["timer"].daemon = True
+                info["timer"].start()
+        self._publish(info, "pending" if expect else "sent")
+
+    def _timeout(self, info):
+        with self._lock:
+            if self._pending is not info:
+                return
+            self._pending = None
+        self._publish(info, "unconfirmed")
+
+    def on_frame(self, frame):
+        mode = frame.get("current_mode")
+        if not isinstance(mode, str) or not mode:
+            return  # boot heartbeat: says nothing about the mode
+        with self._lock:
+            p = self._pending
+            if p is None or time.monotonic() - p["sent_at"] < CMD_CONFIRM_GRACE:
+                return
+            kind, code = p["expect"]
+            ok = (mode[0] == code) if kind == "is" else (mode[0] != code)
+            if ok or p["retried"]:
+                p["timer"].cancel()
+                self._pending = None
+                status = "confirmed" if ok else "failed"
+            else:
+                p["retried"] = True
+                p["sent_at"] = time.monotonic()
+                status = "retrying"
+        if status == "retrying" and not send_publish_to_box(DEVICE_ID, p["topic"], p["payload"]):
+            status = "failed"
+            with self._lock:
+                if self._pending is p:
+                    p["timer"].cancel()
+                    self._pending = None
+        self._publish(p, status, reported=mode)
+
+
+commands = CommandTracker()
+
+
 def cmd_callback(topic, payload):
     """Forward injection commands to the box.
     Two routes:
@@ -831,6 +1008,7 @@ def cmd_callback(topic, payload):
     # Macro mode:
     #   aldes/vmc/cmd/macro/<name>           -> use <name>
     #   aldes/vmc/cmd/macro/_select payload  -> use payload as macro name (HA select)
+    label = "raw"
     if relative.startswith("macro/"):
         macro_name = relative[len("macro/"):]
         if macro_name == "_select":
@@ -842,6 +1020,7 @@ def cmd_callback(topic, payload):
         relative = f"devices/{DEVICE_ID}/messages/devicebound"
         payload = translated.encode()
         log(f"macro '{macro_name}' -> {translated}")
+        label = macro_name
 
     # Only ever send to the configured box, never to another LAN client that connected.
     if not box_online():
@@ -849,8 +1028,10 @@ def cmd_callback(topic, payload):
             others = list(sessions)
         hint = f" (connected client_ids: {others})" if others else ""
         log(f"cmd: box {DEVICE_ID} not connected, dropped {topic}{hint}")
+        commands.not_connected(label)
         return
-    send_publish_to_box(DEVICE_ID, relative, payload)
+    if send_publish_to_box(DEVICE_ID, relative, payload):
+        commands.sent(label, relative, payload)
 
 
 def _build_ssl_context():

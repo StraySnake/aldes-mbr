@@ -274,3 +274,158 @@ def test_rejected_publish_does_not_update_last_seen(bridge, mqtt_client):
     time.sleep(0.5)
     assert not mqtt_client.last(LAST_SEEN)
     intruder.close()
+
+
+# ---------- Home Assistant discovery ----------
+
+def discovery(mqtt_port):
+    from conftest import Recorder
+    rec = Recorder(mqtt_port, "disco-reader")
+    rec.client.subscribe("homeassistant/#", qos=1)
+    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 28)
+    rec.close()
+    return {t: json.loads(rec.last(t)) for t in rec.msgs if t.startswith("homeassistant/") and rec.last(t)}
+
+
+def test_discovery_expire_after_holiday_and_buttons(bridge, mqtt_port):
+    cfgs = discovery(mqtt_port)
+    base = "homeassistant/sensor/aldes_vmc_AABBCCDDEEFF"
+    assert cfgs[f"{base}/outside_temperature/config"]["expire_after"] == 900
+    assert "expire_after" not in cfgs[f"{base}/last_seen/config"]
+    for obj in ("holiday_start", "holiday_end"):
+        cfg = cfgs[f"{base}/{obj}/config"]
+        assert cfg["device_class"] == "timestamp" and "_date_mode" in cfg["value_template"]
+    assert cfgs[f"{base}/last_command/config"]["state_topic"] == "aldes/vmc/command_result"
+    btn = "homeassistant/button/aldes_vmc_AABBCCDDEEFF"
+    assert cfgs[f"{btn}/btn_override_on/config"]["command_topic"] == "aldes/vmc/cmd/macro/override_on"
+    assert f"{btn}/btn_override_off/config" in cfgs
+
+
+def test_expire_after_can_be_disabled(start_bridge, mqtt_port):
+    start_bridge({"SENSOR_EXPIRE_AFTER": "0"})
+    cfgs = discovery(mqtt_port)
+    assert "expire_after" not in cfgs["homeassistant/sensor/aldes_vmc_AABBCCDDEEFF/outside_temperature/config"]
+
+
+# ---------- command confirmation ----------
+
+RESULT = "aldes/vmc/command_result"
+
+
+def result(mqtt_client):
+    last = mqtt_client.last(RESULT)
+    return json.loads(last) if last else {}
+
+
+def statuses(mqtt_client):
+    return [json.loads(p)["status"] for p in mqtt_client.payloads(RESULT) if p]
+
+
+@pytest.fixture
+def cmd_box(start_bridge):
+    bridge = start_bridge({"CMD_CONFIRM_GRACE": "0.2", "CMD_CONFIRM_TIMEOUT": "30"})
+    b = FakeBox(bridge.port)
+    assert wait(lambda: "SUBSCRIBE" in bridge.log())
+    yield bridge, b
+    b.close()
+
+
+def report_mode(box, mode):
+    time.sleep(0.3)  # past the grace period
+    box.publish(EVENTS, json.dumps({"current_mode": mode, "outside_tpt": 20.0}).encode())
+
+
+def test_command_confirmed_by_telemetry(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.received('"X"'))
+    assert wait(lambda: result(mqtt_client).get("status") == "pending")
+    box.publish(EVENTS, json.dumps(HEARTBEAT).encode())  # no current_mode: ignored
+    report_mode(box, "X")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    r = result(mqtt_client)
+    assert r["command"] == "boost" and r["expected_mode"] == "X" and r["reported_mode"] == "X"
+
+
+def test_command_retried_once_then_confirmed(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/_select", "Invités")
+    assert wait(lambda: box.received('"Y"'))
+    report_mode(box, "V")  # old mode: resent once
+    assert wait(lambda: sum('"Y"' in r for r in box.rx) == 2)
+    assert wait(lambda: result(mqtt_client).get("status") == "retrying")
+    report_mode(box, "Y")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+
+
+def test_command_failed_after_one_retry(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.received('"X"'))
+    report_mode(box, "V")
+    assert wait(lambda: result(mqtt_client).get("status") == "retrying")
+    report_mode(box, "V")
+    assert wait(lambda: result(mqtt_client).get("status") == "failed")
+    assert sum('"X"' in r for r in box.rx) == 2  # one retry only
+    report_mode(box, "V")
+    time.sleep(0.5)
+    assert sum('"X"' in r for r in box.rx) == 2
+
+
+def test_frame_within_grace_period_ignored(start_bridge, mqtt_client):
+    bridge = start_bridge({"CMD_CONFIRM_GRACE": "5"})
+    box = FakeBox(bridge.port)
+    assert wait(lambda: "SUBSCRIBE" in bridge.log())
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.received('"X"'))
+    box.publish(EVENTS, json.dumps({"current_mode": "V"}).encode())  # sampled before the change
+    assert wait(lambda: any_frame_has(mqtt_client, "current_mode", "V"))
+    time.sleep(0.3)
+    assert result(mqtt_client).get("status") == "pending"
+    assert sum('"X"' in r for r in box.rx) == 1
+    box.close()
+
+
+def test_holiday_stop_confirmed_when_mode_leaves_w(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances_stop", "1")
+    assert wait(lambda: box.received("00010101000000Z"))
+    report_mode(box, "V")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    assert result(mqtt_client)["expected_mode"] == "!W"
+
+
+def test_newer_command_replaces_pending_one(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    mqtt_client.publish("aldes/vmc/cmd/macro/quotidien", "1")
+    assert wait(lambda: box.received('"V"'))
+    report_mode(box, "V")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    assert result(mqtt_client)["command"] == "quotidien"
+    assert sum('"X"' in r for r in box.rx) == 1  # boost not retried
+
+
+def test_unverifiable_command_reported_as_sent(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/programme", "1")
+    assert wait(lambda: result(mqtt_client).get("status") == "sent")
+    mqtt_client.publish("aldes/vmc/cmd/macro/override_on", "1")
+    assert wait(lambda: box.received('"changeCMO"'))
+    assert wait(lambda: result(mqtt_client).get("command") == "override_on")
+    assert result(mqtt_client)["status"] == "sent"
+
+
+def test_command_unconfirmed_after_timeout(start_bridge, mqtt_client):
+    bridge = start_bridge({"CMD_CONFIRM_TIMEOUT": "1"})
+    box = FakeBox(bridge.port)
+    assert wait(lambda: "SUBSCRIBE" in bridge.log())
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.received('"X"'))
+    assert wait(lambda: result(mqtt_client).get("status") == "unconfirmed", 5)
+    box.close()
+
+
+def test_command_without_box_reported(bridge, mqtt_client):
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: result(mqtt_client).get("status") == "not_connected")

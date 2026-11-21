@@ -76,7 +76,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    PUBLISH ... payload = {"outside_tpt":..., "current_mode":"V", ...}
    ```
 
-6. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago".
+6. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 15 min (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Other entities: **Début / Fin des vacances**, **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
 
 7. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
 
@@ -105,6 +105,12 @@ The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that transl
 | `vacances_stop` | cancel holidays |
 | `programme` / `z` | mode Z (schedule) |
 | `override_on` / `override_off` | `changeCMO 1` / `changeCMO 0` |
+
+### Command confirmation
+
+Commands reach the box without acknowledgement (MQTT QoS 0). For mode changes, the bridge checks the next telemetry frames: if the box still reports the old mode, the command is sent once more, then reported as failed. The outcome is published (retained) on `aldes/vmc/command_result` and shown by the **Dernière commande** sensor: *En attente*, *Confirmée*, *Renvoyée*, *Échec*, *Non confirmée* (no telemetry within `CMD_CONFIRM_TIMEOUT`, 15 min by default), *Envoyée* (not verifiable: Programme, override), *Box déconnectée*. The attributes give the command, the expected and the reported mode.
+
+Since the box sends its telemetry every 1–5 min, confirmation can take a few minutes.
 
 Publish commands with `retain=false`: retained messages on `aldes/vmc/cmd/#` are ignored (they would otherwise be replayed to the box every time the bridge reconnects).
 

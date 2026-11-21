@@ -100,3 +100,20 @@ def test_parse_allowed_ips():
     assert fi._parse_allowed_ips(" 192.168.1.50 , 10.0.0.1,") == {"192.168.1.50", "10.0.0.1"}
     with pytest.raises(SystemExit):
         fi._parse_allowed_ips("192.168.1.300")
+
+
+@pytest.mark.parametrize("macro,expected", [
+    ("boost", ("is", "X")), ("quotidien", ("is", "V")), ("invites", ("is", "Y")),
+    ("vacances7j", ("is", "W")), ("vacances_stop", ("not", "W")),
+    ("programme", None),      # Programme: the box may report the scheduled mode
+    ("override_on", None),    # changeCMO: not reported in the telemetry
+])
+def test_expected_mode_of_macros(macro, expected):
+    assert fi.expected_mode(fi._macro_payload(macro)) == expected
+
+
+@pytest.mark.parametrize("payload", [b"not json", b"{}", b'{"method":"changeMode","params":[]}',
+                                     b'{"method":"changeMode","params":[1]}',
+                                     b'{"method":"changeMode","params":["Q"]}'])
+def test_expected_mode_of_unverifiable_payloads(payload):
+    assert fi.expected_mode(payload) is None
