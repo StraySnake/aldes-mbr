@@ -284,7 +284,8 @@ def discovery(mqtt_port):
     from conftest import Recorder
     rec = Recorder(mqtt_port, "disco-reader")
     rec.client.subscribe("homeassistant/#", qos=1)
-    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 28)
+    # 25 sensors + 1 select + 9 buttons
+    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 35)
     rec.close()
     return {t: json.loads(rec.last(t)) for t in rec.msgs if t.startswith("homeassistant/") and rec.last(t)}
 
@@ -301,6 +302,22 @@ def test_discovery_expire_after_holiday_and_buttons(bridge, mqtt_port):
     btn = "homeassistant/button/aldes_vmc_AABBCCDDEEFF"
     assert cfgs[f"{btn}/btn_override_on/config"]["command_topic"] == "aldes/vmc/cmd/macro/override_on"
     assert f"{btn}/btn_override_off/config" in cfgs
+
+
+def test_discovery_optional_unknown_and_firmware_sensors(bridge, mqtt_port):
+    cfgs = discovery(mqtt_port)
+    base = "homeassistant/sensor/aldes_vmc_AABBCCDDEEFF"
+    # no air quality probe / no RSSI on many boxes: disabled by default
+    for obj in ("co2", "pm25", "voc", "rssi"):
+        assert cfgs[f"{base}/{obj}/config"]["enabled_by_default"] is False, obj
+    assert "enabled_by_default" not in cfgs[f"{base}/outside_temperature/config"]
+    # Vers_W is a Unix timestamp on recent boxes: shown as a date
+    assert "timestamp_custom" in cfgs[f"{base}/fw_wifi/config"]["value_template"]
+    # unknown fields exposed as disabled diagnostic sensors
+    for key in ("ff_cpt", "dep_ind", "dtb_ind", "cve_csn", "vi_csn", "tte_csn"):
+        cfg = cfgs[f"{base}/raw_{key}/config"]
+        assert cfg["enabled_by_default"] is False and cfg["entity_category"] == "diagnostic"
+        assert key in cfg["value_template"]
 
 
 def test_expire_after_can_be_disabled(start_bridge, mqtt_port):

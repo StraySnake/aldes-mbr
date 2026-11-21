@@ -36,12 +36,32 @@ SENSORS = [
     ("supply_speed",        "Vitesse insufflation",  "vi_spd",      {"unit_of_measurement": "rpm", "icon": "mdi:fan", "state_class": "measurement"}),
     ("exchanger_power",     "Puissance échangeur",   "echange_pwr", {"device_class": "power", "unit_of_measurement": "W", "state_class": "measurement"}),
     ("set_speed",           "Vitesse demandée",      "set_spd",     {"icon": "mdi:speedometer", "state_class": "measurement"}),
-    ("co2",                 "CO₂",                   "Co2_vmc",     {"device_class": "carbon_dioxide", "unit_of_measurement": "ppm", "state_class": "measurement"}),
-    ("pm25",                "PM2.5",                 "Pm25_Vmc",    {"device_class": "pm25", "unit_of_measurement": "µg/m³", "state_class": "measurement"}),
-    ("voc",                 "COV",                   "Voc_Vmc",     {"icon": "mdi:molecule", "state_class": "measurement"}),
-    ("rssi",                "Signal WiFi",           "RSSI",        {"icon": "mdi:wifi", "entity_category": "diagnostic"}),
-    ("fw_wifi",             "Firmware WiFi",         "Vers_W",      {"icon": "mdi:chip", "entity_category": "diagnostic"}),
+    # Air quality probes are optional: 0 when the unit has none. Disabled by default
+    # (HA applies this only when it first creates the entity), enable them if you have them.
+    ("co2",                 "CO₂",                   "Co2_vmc",     {"device_class": "carbon_dioxide", "unit_of_measurement": "ppm", "state_class": "measurement", "enabled_by_default": False}),
+    ("pm25",                "PM2.5",                 "Pm25_Vmc",    {"device_class": "pm25", "unit_of_measurement": "µg/m³", "state_class": "measurement", "enabled_by_default": False}),
+    ("voc",                 "COV",                   "Voc_Vmc",     {"icon": "mdi:molecule", "state_class": "measurement", "enabled_by_default": False}),
+    # Absent from the frames of some boxes, "--%%" in others: disabled by default.
+    ("rssi",                "Signal WiFi",           "RSSI",        {"icon": "mdi:wifi", "entity_category": "diagnostic", "enabled_by_default": False}),
+    # Vers_W is the WiFi firmware build date as a Unix timestamp (e.g. 1544745600.0 =
+    # 2018-12-14) on recent boxes, a plain version string ("21") on others.
+    ("fw_wifi",             "Firmware WiFi",         "Vers_W",      {"icon": "mdi:chip", "entity_category": "diagnostic", "value_template": (
+        "{% set v = value_json.Vers_W | default(none) %}"
+        "{% if v is number and v > 1000000000 %}{{ v | int | timestamp_custom('%Y-%m-%d', false) }}"
+        "{% else %}{{ v }}{% endif %}")}),
     ("fw_uc",               "Firmware MCU",          "Vers_UC",     {"icon": "mdi:chip", "entity_category": "diagnostic"}),
+]
+
+# Telemetry fields whose meaning is not known yet, exposed raw (diagnostic, disabled by
+# default) so they can be compared with real observations and named later. The guesses
+# come from the field names only.
+UNKNOWN_FIELDS = [
+    ("ff_cpt",  "maybe a filter counter"),
+    ("dep_ind", ""),
+    ("dtb_ind", "maybe the bypass state"),
+    ("cve_csn", "maybe the extract fan consumption"),
+    ("vi_csn",  "maybe the supply fan consumption"),
+    ("tte_csn", "maybe a total consumption"),
 ]
 
 def publish_ha_discovery(client):
@@ -66,6 +86,25 @@ def publish_ha_discovery(client):
             cfg["expire_after"] = SENSOR_EXPIRE_AFTER
         topic = f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
+
+    # Unknown fields (see UNKNOWN_FIELDS)
+    for key, _hint in UNKNOWN_FIELDS:
+        client.publish(
+            f"{HA_DISCO_PREFIX}/sensor/{base_id}/raw_{key}/config",
+            json.dumps({
+                "name": f"Champ {key} (inconnu)",
+                "unique_id": f"{base_id}_raw_{key}",
+                "state_topic": EVENTS_TOPIC,
+                "value_template": f"{{{{ value_json.{key} | default(none) }}}}",
+                "state_class": "measurement",
+                "icon": "mdi:help-circle-outline",
+                "entity_category": "diagnostic",
+                "enabled_by_default": False,
+                "device": DEVICE_BLOCK,
+                **AVAILABILITY,
+            }),
+            qos=1, retain=True,
+        )
 
     # Holiday start/end, published by the bridge on HOLIDAY_TOPIC when a holiday command
     # is confirmed: a real box leaves Start_date_mode / End_date_mode empty, even in W.
@@ -173,4 +212,5 @@ def publish_ha_discovery(client):
             json.dumps(cfg), qos=1, retain=True,
         )
 
-    log(f"HA discovery: {len(SENSORS) + 4} sensors + 1 select + {len(macros)} buttons")
+    n_sensors = len(SENSORS) + len(UNKNOWN_FIELDS) + 4
+    log(f"HA discovery: {n_sensors} sensors + 1 select + {len(macros)} buttons")
