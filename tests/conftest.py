@@ -12,7 +12,7 @@ from pathlib import Path
 import paho.mqtt.client as mqtt
 import pytest
 
-from helpers import DEVICE_MAC, wait
+from helpers import DEVICE_MAC, EVENTS, wait
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -136,12 +136,32 @@ class Bridge:
         return self.proc.returncode
 
 
+@pytest.fixture(scope="session")
+def clear_retained(mqtt_port):
+    """Callable removing the bridge's retained state, so each test starts from scratch.
+    One client for the whole session (paho's loop_stop() takes up to 1 s)."""
+    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="cleaner")
+    c.connect("127.0.0.1", mqtt_port)
+    c.loop_start()
+
+    def _clear():
+        for topic in (f"aldes/vmc/raw/{EVENTS}", "aldes/vmc/last_seen", "aldes/vmc/status"):
+            c.publish(topic, "", qos=1, retain=True).wait_for_publish(5)
+
+    yield _clear
+    c.loop_stop()
+    c.disconnect()
+
+
 @pytest.fixture
-def start_bridge(mqtt_port, tmp_path):
-    """Factory: start_bridge(env={...}) -> Bridge. Stopped at teardown."""
+def start_bridge(mqtt_port, clear_retained, tmp_path):
+    """Factory: start_bridge(env={...}, clear=True) -> Bridge. Stopped at teardown.
+    clear=False keeps Mosquitto's retained state from a previous bridge."""
     bridges = []
 
-    def _start(env=None):
+    def _start(env=None, clear=True):
+        if clear:
+            clear_retained()
         workdir = tmp_path / f"bridge{len(bridges)}"
         workdir.mkdir()
         b = Bridge(mqtt_port, workdir, env)
