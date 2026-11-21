@@ -42,6 +42,7 @@ class Session:
         self._ids_lock = threading.Lock()
         self._last_pkt_id = 0
         self.inflight = {}  # packet id -> topic of QoS 1 PUBLISHes not yet acknowledged
+        self.replaced = False  # set when a newer connection of the same box took over
 
     def next_packet_id(self, topic):
         """Any thread: a fresh packet id (1..65535) for a QoS 1 PUBLISH, recorded in flight."""
@@ -69,6 +70,7 @@ class Session:
     def kill(self):
         """Any thread: abort the connection at the TCP level, without touching the SSL
         object. The owner thread then sees EOF/an error and cleans up."""
+        self.replaced = True
         try:
             socket.socket.shutdown(self.sock, socket.SHUT_RDWR)
         except OSError:
@@ -231,7 +233,7 @@ def handle_client(raw_sock, addr):
                 # near the end), first 300 bytes otherwise.
                 preview = msg if LOG_LEVEL == "debug" else msg[:300]
                 # The first frame of a connection is logged at info level (shows the box works),
-                # the following ones only at debug level (one every 1-5 min, forever).
+                # the following ones only at debug level (one every 10 min, forever).
                 lvl = "debug" if sess.frames else "info"
                 sess.frames += 1
                 log(f"{addr} PUBLISH qos={qos} topic={topic} ({len(msg)}b)", lvl)
@@ -306,8 +308,13 @@ def handle_client(raw_sock, addr):
     except ssl.SSLError as e:
         log(f"{addr} TLS error: {e}")
     except Exception as e:
-        log(f"{addr} error: {type(e).__name__}: {e}")
+        if sess and sess.replaced:
+            pass  # expected: we shut this socket down ourselves (logged below)
+        else:
+            log(f"{addr} error: {type(e).__name__}: {e}")
     finally:
+        if sess and sess.replaced:
+            log(f"{addr} old session closed: replaced by a newer connection of the box")
         if sess:
             sess.close()
         else:

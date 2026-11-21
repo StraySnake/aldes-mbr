@@ -28,7 +28,7 @@ Env vars:
   BRIDGE_TOPIC_PREFIX    topic prefix for republished messages (default: aldes/vmc)
   LOG_FILE               additional log file (default: /logs/mitm.log)
   SENSOR_EXPIRE_AFTER    seconds without a frame from the box before HA marks the sensors
-                         unavailable (default: 900, 0 = never)
+                         unavailable (default: 1800, 0 = never)
   CMD_QOS                QoS of the commands sent to the box: 1 (default, acknowledged)
                          or 0 (legacy; the box then drops the first 2 bytes of the payload)
   CMD_CONFIRM_TIMEOUT    seconds to wait for a telemetry frame confirming a mode change
@@ -97,7 +97,8 @@ if LOG_LEVEL not in LOG_LEVELS:
     sys.exit(f"FATAL: LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {LOG_LEVEL!r}")
 TLS_CIPHERS = os.getenv("TLS_CIPHERS", "").strip() or "ALL:@SECLEVEL=0"
 HEALTH_FILE = Path(os.getenv("HEALTH_FILE", "/tmp/aldes-bridge.health"))
-SENSOR_EXPIRE_AFTER = _env_num("SENSOR_EXPIRE_AFTER", 900, minimum=0)
+# Real box: one telemetry frame every 10 min -> 30 min = 3 missed frames.
+SENSOR_EXPIRE_AFTER = _env_num("SENSOR_EXPIRE_AFTER", 1800, minimum=0)
 CMD_CONFIRM_TIMEOUT = _env_num("CMD_CONFIRM_TIMEOUT", 900.0, cast=float, minimum=1)
 # Frames received this soon after a command may have been sampled before the box
 # applied it: they neither confirm nor refute it.

@@ -58,7 +58,7 @@ services:
       HA_DISCOVERY_PREFIX: "homeassistant"
 
       # === Home Assistant behaviour ===
-      # SENSOR_EXPIRE_AFTER: "900"   # sensors unavailable after 15 min without telemetry (0 = never)
+      # SENSOR_EXPIRE_AFTER: "1800"  # sensors unavailable after 30 min without telemetry (0 = never)
       # CMD_CONFIRM_TIMEOUT: "900"   # max wait for a frame confirming a mode change
       # CMD_QOS: "1"                 # 1 = commands acknowledged by the box (0 = legacy, not recommended)
 

@@ -5,7 +5,7 @@ import json, threading
 # ---------- telemetry merge ----------
 #
 # The box sends two kinds of frames on the same topic: a short boot heartbeat
-# (firmware, RSSI...) right after connecting, and the full telemetry every 1-5 min.
+# (firmware, RSSI...) right after connecting, and the full telemetry every 10 min.
 # Republishing the heartbeat as-is would turn every sensor to "unknown" until the
 # next full frame, so each frame is merged into the last known values instead.
 

@@ -109,6 +109,8 @@ def test_retained_command_ignored_and_clearing_it_does_nothing(start_bridge, mqt
 def test_reconnect_replaces_previous_session(bridge, box, mqtt_client):
     box2 = FakeBox(bridge.port)
     assert box.closed.wait(5), "old session not closed"
+    assert wait(lambda: "replaced by a newer connection" in bridge.log())
+    assert "error:" not in bridge.log()  # e.g. no BrokenPipeError for the expected shutdown
     mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
     assert wait(lambda: box2.received('"X"'))
     assert mqtt_client.last(STATUS) == "online"
@@ -290,7 +292,7 @@ def discovery(mqtt_port):
 def test_discovery_expire_after_holiday_and_buttons(bridge, mqtt_port):
     cfgs = discovery(mqtt_port)
     base = "homeassistant/sensor/aldes_vmc_AABBCCDDEEFF"
-    assert cfgs[f"{base}/outside_temperature/config"]["expire_after"] == 900
+    assert cfgs[f"{base}/outside_temperature/config"]["expire_after"] == 1800
     assert "expire_after" not in cfgs[f"{base}/last_seen/config"]
     for obj in ("holiday_start", "holiday_end"):
         cfg = cfgs[f"{base}/{obj}/config"]
