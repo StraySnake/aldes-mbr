@@ -14,6 +14,7 @@ This broker:
 
 Env vars:
   CERT_DIR               where to store the generated cert/key (default: /data)
+  LISTEN_PORT            TLS listening port (default: 8883, the port the box uses)
   UPSTREAM_MQTT_HOST     bridge destination (default: 127.0.0.1)
   DEVICE_MAC             REQUIRED. The HF-LPB100 module MAC (12 hex chars, ':' or '-' OK)
   DEVICE_NAME            HA device name (default: "Aldes VMC")
@@ -86,7 +87,7 @@ CMD_TOPIC = f"{PREFIX}/cmd/devices/{DEVICE_ID}/messages/devicebound"
 STATUS_TOPIC = f"{PREFIX}/status"
 
 HOST = "0.0.0.0"
-PORT = 8883
+PORT = int(os.getenv("LISTEN_PORT", "8883"))  # the box always uses 8883; override for tests
 
 # Timeouts (seconds)
 HANDSHAKE_TIMEOUT = 30      # TLS handshake + first CONNECT packet
