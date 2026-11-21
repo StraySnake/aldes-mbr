@@ -29,6 +29,8 @@ Env vars:
   LOG_FILE               additional log file (default: /logs/mitm.log)
   SENSOR_EXPIRE_AFTER    seconds without a frame from the box before HA marks the sensors
                          unavailable (default: 900, 0 = never)
+  CMD_QOS                QoS of the commands sent to the box: 1 (default, acknowledged)
+                         or 0 (legacy; the box then drops the first 2 bytes of the payload)
   CMD_CONFIRM_TIMEOUT    seconds to wait for a telemetry frame confirming a mode change
                          (default: 900)
   LOG_LEVEL              debug | info | warning (default: info). "info" logs connections,
@@ -100,6 +102,12 @@ CMD_CONFIRM_TIMEOUT = _env_num("CMD_CONFIRM_TIMEOUT", 900.0, cast=float, minimum
 # Frames received this soon after a command may have been sampled before the box
 # applied it: they neither confirm nor refute it.
 CMD_CONFIRM_GRACE = _env_num("CMD_CONFIRM_GRACE", 3.0, cast=float, minimum=0)
+# QoS of the commands sent to the box. The firmware reads a packet id in every PUBLISH
+# it receives, even QoS 0 ones, and acknowledges it: with QoS 0 it eats the first 2
+# bytes of the payload. QoS 1 gives it a real packet id, and its PUBACK confirms receipt.
+CMD_QOS = _env_num("CMD_QOS", 1, minimum=0)
+if CMD_QOS > 1:
+    sys.exit(f"FATAL: CMD_QOS must be 0 or 1, got {CMD_QOS}")
 
 # Device identity — DEVICE_MAC is REQUIRED
 _DEVICE_MAC_RAW = os.getenv("DEVICE_MAC", "").upper().replace(":", "").replace("-", "")

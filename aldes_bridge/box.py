@@ -3,8 +3,8 @@ import json, socket, ssl, struct, threading, time
 from collections import deque
 from datetime import datetime, timezone
 from .config import (
-    ALLOWED_IPS, BOX_EVENTS, BOX_TOPIC_PREFIX, DEFAULT_KEEPALIVE, DEVICE_ID, HANDSHAKE_TIMEOUT,
-    MAX_PACKET_SIZE, POLL_INTERVAL,
+    ALLOWED_IPS, BOX_EVENTS, BOX_TOPIC_PREFIX, CMD_QOS, DEFAULT_KEEPALIVE, DEVICE_ID,
+    HANDSHAKE_TIMEOUT, LOG_LEVEL, MAX_PACKET_SIZE, POLL_INTERVAL,
 )
 from .logs import log, redact_password
 from .mqtt_codec import (
@@ -39,6 +39,21 @@ class Session:
         self.frames = 0  # PUBLISHes received on this connection
         self.owner = threading.get_ident()
         self._outbox = deque()
+        self._ids_lock = threading.Lock()
+        self._last_pkt_id = 0
+        self.inflight = {}  # packet id -> topic of QoS 1 PUBLISHes not yet acknowledged
+
+    def next_packet_id(self, topic):
+        """Any thread: a fresh packet id (1..65535) for a QoS 1 PUBLISH, recorded in flight."""
+        with self._ids_lock:
+            self._last_pkt_id = self._last_pkt_id % 0xFFFF + 1
+            self.inflight[self._last_pkt_id] = topic
+            return self._last_pkt_id
+
+    def acknowledge(self, pkt_id):
+        """Owner thread: PUBACK received. Returns the topic, or None if unknown."""
+        with self._ids_lock:
+            return self.inflight.pop(pkt_id, None)
 
     def send(self, data):
         if threading.get_ident() == self.owner:
@@ -74,23 +89,32 @@ def box_online():
 # ---------- per-client MQTT handler ----------
 
 def send_publish_to_box(client_id, topic, payload):
-    """Inject a QoS 0 PUBLISH back to a connected device — used for command injection."""
+    """Send a command PUBLISH to a connected device, with QoS CMD_QOS.
+    Returns its packet id (0 with QoS 0), or None if it could not be sent."""
     with _sessions_lock:
         sess = sessions.get(client_id)
     if not sess:
         log(f"inject: client {client_id} not connected")
-        return False
+        return None
     if isinstance(payload, str):
         payload = payload.encode("utf-8")
-    body = encode_string(topic) + payload
-    pkt = bytes([0x30]) + encode_remaining_length(len(body)) + body
+    if CMD_QOS == 1:
+        pkt_id = sess.next_packet_id(topic)
+        body = encode_string(topic) + struct.pack(">H", pkt_id) + payload
+        header = 0x32
+    else:
+        pkt_id = 0
+        body = encode_string(topic) + payload
+        header = 0x30
+    pkt = bytes([header]) + encode_remaining_length(len(body)) + body
     try:
         sess.send(pkt)  # queued, written by the session's own thread
-        log(f"inject: queued for {client_id} topic={topic} ({len(payload)} bytes)", "debug")
-        return True
+        log(f"inject: queued for {client_id} topic={topic} qos={CMD_QOS}"
+            f"{f' pkt_id={pkt_id}' if pkt_id else ''} ({len(payload)} bytes)", "debug")
+        return pkt_id
     except Exception as e:
         log(f"inject err: {e}")
-        return False
+        return None
 
 
 def _unregister(sess):
@@ -203,13 +227,15 @@ def handle_client(raw_sock, addr):
                 if qos > 0:
                     pkt_id = struct.unpack_from(">H", payload, off)[0]; off += 2
                 msg = payload[off:]
-                preview = msg[:300]
+                # Whole frame in debug (~410 bytes: current_mode and the holiday dates are
+                # near the end), first 300 bytes otherwise.
+                preview = msg if LOG_LEVEL == "debug" else msg[:300]
                 # The first frame of a connection is logged at info level (shows the box works),
                 # the following ones only at debug level (one every 1-5 min, forever).
                 lvl = "debug" if sess.frames else "info"
                 sess.frames += 1
                 log(f"{addr} PUBLISH qos={qos} topic={topic} ({len(msg)}b)", lvl)
-                log(f"{addr}   payload = {preview!r}{'...' if len(msg)>300 else ''}", lvl)
+                log(f"{addr}   payload = {preview!r}{'...' if len(msg) > len(preview) else ''}", lvl)
                 if qos == 1 and pkt_id is not None:
                     sess.send(bytes([0x40, 0x02]) + struct.pack(">H", pkt_id))
                 elif qos == 2 and pkt_id is not None:
@@ -255,7 +281,16 @@ def handle_client(raw_sock, addr):
                 sess.send(bytes([0xD0, 0x00]))
 
             elif ptype == PUBACK:
-                pass  # we only send QoS 0, but tolerate it
+                ack_id = struct.unpack_from(">H", payload, 0)[0] if len(payload) >= 2 else 0
+                if sess.acknowledge(ack_id) is not None:
+                    log(f"{addr} PUBACK pkt_id={ack_id}: the box received the command", "debug")
+                    if runtime.commands:
+                        runtime.commands.on_puback(ack_id)
+                elif ack_id == 0x7B22:  # '{"': the start of a JSON command sent with QoS 0
+                    log(f"{addr} PUBACK for a QoS 0 command: the box read the first 2 bytes of its "
+                        f"payload ('{{\"') as a packet id. Set CMD_QOS=1.", "warning")
+                else:
+                    log(f"{addr} PUBACK for unknown pkt_id={ack_id:#06x}", "debug")
 
             elif ptype == DISCONNECT:
                 log(f"{addr} DISCONNECT")

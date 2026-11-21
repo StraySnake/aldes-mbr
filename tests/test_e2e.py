@@ -337,9 +337,10 @@ def report_mode(box, mode):
 
 def test_command_confirmed_by_telemetry(cmd_box, mqtt_client):
     bridge, box = cmd_box
+    n = len(statuses(mqtt_client))
     mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
     assert wait(lambda: box.received('"X"'))
-    assert wait(lambda: result(mqtt_client).get("status") == "pending")
+    assert wait(lambda: "received" in statuses(mqtt_client)[n:])  # PUBACK from the box
     box.publish(EVENTS, json.dumps(HEARTBEAT).encode())  # no current_mode: ignored
     report_mode(box, "X")
     assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
@@ -353,6 +354,7 @@ def test_command_retried_once_then_confirmed(cmd_box, mqtt_client):
     assert wait(lambda: box.received('"Y"'))
     report_mode(box, "V")  # old mode: resent once
     assert wait(lambda: sum('"Y"' in r for r in box.rx) == 2)
+    assert wait(lambda: len(set(box.acked)) == 2)  # the resend has its own packet id
     assert wait(lambda: result(mqtt_client).get("status") == "retrying")
     report_mode(box, "Y")
     assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
@@ -381,7 +383,7 @@ def test_frame_within_grace_period_ignored(start_bridge, mqtt_client):
     box.publish(EVENTS, json.dumps({"current_mode": "V"}).encode())  # sampled before the change
     assert wait(lambda: any_frame_has(mqtt_client, "current_mode", "V"))
     time.sleep(0.3)
-    assert result(mqtt_client).get("status") == "pending"
+    assert result(mqtt_client).get("status") == "received"  # acknowledged, not confirmed yet
     assert sum('"X"' in r for r in box.rx) == 1
     box.close()
 
@@ -408,12 +410,13 @@ def test_newer_command_replaces_pending_one(cmd_box, mqtt_client):
 
 def test_unverifiable_command_reported_as_sent(cmd_box, mqtt_client):
     bridge, box = cmd_box
+    n = len(statuses(mqtt_client))
     mqtt_client.publish("aldes/vmc/cmd/macro/programme", "1")
-    assert wait(lambda: result(mqtt_client).get("status") == "sent")
+    assert wait(lambda: statuses(mqtt_client)[n:][:1] == ["sent"])  # then "received" (PUBACK)
     mqtt_client.publish("aldes/vmc/cmd/macro/override_on", "1")
     assert wait(lambda: box.received('"changeCMO"'))
     assert wait(lambda: result(mqtt_client).get("command") == "override_on")
-    assert result(mqtt_client)["status"] == "sent"
+    assert wait(lambda: result(mqtt_client)["status"] == "received")
 
 
 def test_command_unconfirmed_after_timeout(start_bridge, mqtt_client):
@@ -429,3 +432,73 @@ def test_command_unconfirmed_after_timeout(start_bridge, mqtt_client):
 def test_command_without_box_reported(bridge, mqtt_client):
     mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
     assert wait(lambda: result(mqtt_client).get("status") == "not_connected")
+
+
+# ---------- QoS 1 commands and PUBACK ----------
+
+def test_commands_sent_with_qos1_and_acknowledged(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    n = len(statuses(mqtt_client))
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.acked)
+    assert json.loads(box.rx[-1]) == {"method": "changeMode", "params": ["X"]}  # intact JSON
+    assert wait(lambda: "received" in statuses(mqtt_client)[n:])
+    report_mode(box, "X")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    assert statuses(mqtt_client)[n:] == ["pending", "received", "confirmed"]
+
+
+def test_real_box_with_qos0_loses_the_first_two_bytes(start_bridge, mqtt_client):
+    # What the logs of a real Connect Box showed: PUBACK with pkt_id 0x7b22 ('{"').
+    bridge = start_bridge({"CMD_QOS": "0"})
+    box = FakeBox(bridge.port, quirky=True)
+    assert wait(lambda: "SUBSCRIBE" in bridge.log())
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.rx)
+    assert box.rx[-1] == 'method":"changeMode","params":["X"]}'
+    assert box.acked == [0x7B22]
+    assert wait(lambda: "Set CMD_QOS=1" in bridge.log())
+    box.close()
+
+
+def test_real_box_with_qos1_gets_the_whole_command(start_bridge, mqtt_client):
+    bridge = start_bridge()
+    box = FakeBox(bridge.port, quirky=True)
+    assert wait(lambda: "SUBSCRIBE" in bridge.log())
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.rx)
+    assert json.loads(box.rx[-1]) == {"method": "changeMode", "params": ["X"]}
+    assert wait(lambda: result(mqtt_client).get("status") == "received")
+    box.close()
+
+
+def test_programme_acknowledged_and_reported_mode_recorded(cmd_box, mqtt_client):
+    bridge, box = cmd_box
+    mqtt_client.publish("aldes/vmc/cmd/macro/programme", "1")
+    assert wait(lambda: result(mqtt_client).get("status") == "received")
+    report_mode(box, "V")  # what the box reports in Programme mode, whatever it is
+    assert wait(lambda: result(mqtt_client).get("reported_mode") == "V")
+    assert result(mqtt_client)["status"] == "received"
+    assert "box reports V" in bridge.log()
+
+
+def test_without_puback_still_confirmed_by_telemetry(start_bridge, mqtt_client):
+    bridge = start_bridge({"CMD_CONFIRM_GRACE": "0.2"})
+    box = FakeBox(bridge.port, ack=False)
+    assert wait(lambda: "SUBSCRIBE" in bridge.log())
+    n = len(statuses(mqtt_client))
+    mqtt_client.publish("aldes/vmc/cmd/macro/boost", "1")
+    assert wait(lambda: box.received('"X"'))
+    report_mode(box, "X")
+    assert wait(lambda: result(mqtt_client).get("status") == "confirmed")
+    assert statuses(mqtt_client)[n:] == ["pending", "confirmed"]
+    box.close()
+
+
+def test_full_frame_logged_in_debug(start_bridge):
+    bridge = start_bridge({"LOG_LEVEL": "debug"})
+    box = FakeBox(bridge.port)
+    frame = {"pad": "x" * 400, "current_mode": "V"}
+    box.publish(EVENTS, json.dumps(frame).encode())
+    assert wait(lambda: '"current_mode": "V"' in bridge.log())
+    box.close()

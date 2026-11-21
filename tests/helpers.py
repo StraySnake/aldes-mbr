@@ -60,7 +60,14 @@ class FakeBox:
     """A fake Connect Box. Like the real firmware (and like the broker), it does all
     its TLS I/O in one thread: send() only queues."""
 
-    def __init__(self, port, cid=DEVICE_ID, keepalive=60, connect=True, source_ip=None):
+    def __init__(self, port, cid=DEVICE_ID, keepalive=60, connect=True, source_ip=None,
+                 ack=True, quirky=False):
+        """ack: answer QoS 1 PUBLISHes with a PUBACK.
+        quirky: behave like the real firmware, which reads a packet id in EVERY PUBLISH,
+        QoS 0 included (eating the first 2 bytes of the payload), and acknowledges it."""
+        self.ack = ack
+        self.quirky = quirky
+        self.acked = []  # packet ids we acknowledged
         c = ssl.create_default_context()
         c.check_hostname = False
         c.verify_mode = ssl.CERT_NONE
@@ -116,8 +123,17 @@ class FakeBox:
                         break
                 payload = self._recv_exact(n)
                 if head[0] >> 4 == 3:  # PUBLISH
+                    qos = (head[0] >> 1) & 3
                     tlen = struct.unpack(">H", payload[:2])[0]
-                    self.rx.append(payload[2 + tlen:].decode())
+                    off = 2 + tlen
+                    pkt_id = None
+                    if qos or self.quirky:
+                        pkt_id = struct.unpack(">H", payload[off:off + 2])[0]
+                        off += 2
+                    self.rx.append(payload[off:].decode(errors="replace"))
+                    if pkt_id is not None and self.ack:
+                        self.acked.append(pkt_id)
+                        self._out.append(bytes([0x40, 0x02]) + struct.pack(">H", pkt_id))
         except Exception:
             pass
         self.closed.set()

@@ -28,6 +28,7 @@ def run_bridge_expecting_exit(tmp_path, **env):
     ("LOG_LEVEL", "verbose", "LOG_LEVEL must be one of"),
     ("UPSTREAM_MQTT_TLS", "maybe", "UPSTREAM_MQTT_TLS must be 0 or 1"),
     ("TLS_CIPHERS", "NOT-A-CIPHER", "TLS_CIPHERS 'NOT-A-CIPHER' rejected"),
+    ("CMD_QOS", "2", "CMD_QOS must be 0 or 1"),
 ])
 def test_invalid_config_is_a_clear_fatal_error(tmp_path, name, value, message):
     p = run_bridge_expecting_exit(tmp_path, **{name: value})
