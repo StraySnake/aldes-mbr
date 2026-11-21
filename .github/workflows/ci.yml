@@ -58,7 +58,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test
+      - name: Starts as non-root, exits cleanly on docker stop
         run: |
           docker run -d --name bridge -e DEVICE_MAC=AABBCCDDEEFF aldes-mqtt-bridge:ci
           for _ in $(seq 1 20); do
@@ -67,5 +67,43 @@ jobs:
           done
           docker logs bridge
           docker logs bridge 2>&1 | grep -q "listening on"
+          test "$(docker exec bridge stat -c %U /proc/1)" = "aldes"
+          # no Mosquitto here: the healthcheck must say so (and fail)
+          for _ in $(seq 1 10); do
+            docker exec bridge python /app/healthcheck.py 2>&1 | grep -q "upstream MQTT not connected" && break
+            sleep 1
+          done
+          docker exec bridge python /app/healthcheck.py 2>&1 | grep -q "upstream MQTT not connected"
+          if docker exec bridge python /app/healthcheck.py; then echo "expected unhealthy"; exit 1; fi
           docker stop bridge  # must exit quickly and cleanly on SIGTERM
           test "$(docker inspect -f '{{.State.ExitCode}}' bridge)" = "0"
+
+      - name: Reuses a /data volume created by an older root-only image
+        run: |
+          mkdir -p data
+          # old images ran as root: cert and key end up root-owned, key mode 600
+          docker run --rm -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF --user 0 \
+            --entrypoint python aldes-mqtt-bridge:ci -c "import fake_iothub as f; f.gen_cert()"
+          sudo stat -c '%U %a %n' data/*
+          docker run -d --name upgraded -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF aldes-mqtt-bridge:ci
+          for _ in $(seq 1 20); do
+            docker logs upgraded 2>&1 | grep -q "listening on" && break
+            sleep 1
+          done
+          docker logs upgraded
+          docker logs upgraded 2>&1 | grep -q "listening on"
+          test "$(docker exec upgraded stat -c %U /proc/1)" = "aldes"
+          docker rm -f upgraded
+
+      - name: Healthy once Mosquitto is reachable
+        run: |
+          docker run -d --name mosquitto --network host eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          docker run -d --name healthy --network host -e DEVICE_MAC=AABBCCDDEEFF -e LISTEN_PORT=18883 \
+            aldes-mqtt-bridge:ci
+          for _ in $(seq 1 30); do
+            docker exec healthy python /app/healthcheck.py && break
+            sleep 1
+          done
+          docker logs healthy
+          docker exec healthy python /app/healthcheck.py
+          docker rm -f healthy mosquitto

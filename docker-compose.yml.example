@@ -43,6 +43,9 @@ services:
       UPSTREAM_MQTT_PORT: "1883"
       # UPSTREAM_MQTT_USER: ""
       # UPSTREAM_MQTT_PASS: ""
+      # UPSTREAM_MQTT_TLS: "1"            # Mosquitto over TLS (usually port 8883)
+      # UPSTREAM_MQTT_CA: "/data/ca.crt"  # CA of Mosquitto's certificate (default: system CAs)
+      # UPSTREAM_MQTT_TLS_INSECURE: "1"   # self-signed, NOT verified (prefer UPSTREAM_MQTT_CA)
 
       # === Branding ===
       DEVICE_NAME: "Aldes VMC"
@@ -59,5 +62,11 @@ services:
       # CMD_CONFIRM_TIMEOUT: "900"   # max wait for a frame confirming a mode change
 
       LOG_FILE: "/logs/mitm.log"
+      # LOG_LEVEL: "info"            # debug = every telemetry frame with its payload
       # LOG_MAX_BYTES: "5242880"   # rotate mitm.log above 5 MB (0 = never)
       # LOG_BACKUPS: "3"
+
+      # === TLS offered to the box (advanced) ===
+      # The suite the box negotiates is logged at each connection ("TLS TLSv1.2 <suite>").
+      # Once known, you can restrict to it, e.g.:
+      # TLS_CIPHERS: "ECDHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0"

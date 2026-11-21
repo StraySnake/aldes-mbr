@@ -101,9 +101,10 @@ def mqtt_client(mqtt_port, request):
 
 
 class Bridge:
-    def __init__(self, mqtt_port, workdir, env=None):
+    def __init__(self, mqtt_port, workdir, env=None, wait_upstream=True):
         self.port = free_port()
         self.logfile = workdir / "mitm.log"
+        self.health_file = workdir / "health"
         full_env = dict(
             os.environ,
             CERT_DIR=str(workdir),
@@ -112,11 +113,13 @@ class Bridge:
             LISTEN_PORT=str(self.port),
             UPSTREAM_MQTT_HOST="127.0.0.1",
             UPSTREAM_MQTT_PORT=str(mqtt_port),
-            **(env or {}),
+            HEALTH_FILE=str(self.health_file),
         )
+        full_env.update(env or {})
         self.proc = subprocess.Popen([sys.executable, "-u", str(REPO / "fake_iothub.py")], env=full_env,
                                      stdout=open(workdir / "stdout.log", "w"), stderr=subprocess.STDOUT)
-        ok = wait(lambda: "listening" in self.log() and "HA discovery:" in self.log(), 20)
+        # The health file is written once the listener is up (works at any LOG_LEVEL).
+        ok = wait(lambda: self.health_file.exists() and (not wait_upstream or "HA discovery:" in self.log()), 20)
         assert ok, f"bridge did not start:\n{(workdir / 'stdout.log').read_text()}"
 
     def log(self):
@@ -156,16 +159,17 @@ def clear_retained(mqtt_port):
 
 @pytest.fixture
 def start_bridge(mqtt_port, clear_retained, tmp_path):
-    """Factory: start_bridge(env={...}, clear=True) -> Bridge. Stopped at teardown.
-    clear=False keeps Mosquitto's retained state from a previous bridge."""
+    """Factory: start_bridge(env={...}, clear=True, wait_upstream=True) -> Bridge.
+    Stopped at teardown. clear=False keeps Mosquitto's retained state from a previous
+    bridge; wait_upstream=False does not wait for the connection to Mosquitto."""
     bridges = []
 
-    def _start(env=None, clear=True):
+    def _start(env=None, clear=True, wait_upstream=True):
         if clear:
             clear_retained()
         workdir = tmp_path / f"bridge{len(bridges)}"
         workdir.mkdir()
-        b = Bridge(mqtt_port, workdir, env)
+        b = Bridge(mqtt_port, workdir, env, wait_upstream)
         bridges.append(b)
         return b
 
