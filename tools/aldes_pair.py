@@ -21,7 +21,6 @@ On lui balance juste le password encodé via la longueur des paquets.
 import getpass
 import os
 import socket
-import struct
 import sys
 import threading
 import time
@@ -66,7 +65,7 @@ def send_packet(sock, length, dst_ip):
     payload = bytes([0x05]) * length
     try:
         sock.sendto(payload, (dst_ip, SMARTLINK_PORT))
-    except OSError as e:
+    except OSError:
         # winsock might complain on size — keep going
         pass
 
@@ -120,7 +119,7 @@ def find_loop(sock, dst_ip):
     print("[smartlink] find loop will start in 10 s...", flush=True)
     time.sleep(10)
     print("[smartlink] find loop starting (will run for ~5 min)...", flush=True)
-    for i in range(60):  # 60 iterations × 5s = 5 min total
+    for _ in range(60):  # 60 iterations × 5s = 5 min total
         if stop_flag.is_set():
             return
         try:
@@ -163,8 +162,8 @@ def main():
     local_ip, bcast_ip = get_broadcast_ip()
     print(f"[init] PC IP: {local_ip}, broadcast: {bcast_ip}", flush=True)
     print(f"[init] WiFi password length: {len(password)} bytes", flush=True)
-    print(f"[init] HF-LPB100 will pick up SSID from your PC's current WiFi association", flush=True)
-    print(f"[init] Make sure you're connected to the TARGET 2.4 GHz WiFi.", flush=True)
+    print("[init] HF-LPB100 will pick up SSID from your PC's current WiFi association", flush=True)
+    print("[init] Make sure you're connected to the TARGET 2.4 GHz WiFi.", flush=True)
 
     # UDP socket: bind to port 49999, broadcast enabled
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

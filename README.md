@@ -116,6 +116,16 @@ The box cannot be authenticated: its SAS token is signed with an Aldes key we do
 - **`DEVICE_IP` (optional, recommended)**: connections from any other IP are closed immediately. Without it, a device on your LAN that knows the box's MAC (visible in any ARP table) can connect with its client_id, take over the session and receive your commands instead of the box. Reserve the box's IP in your DHCP server before setting it, otherwise the bridge stops accepting the box when its IP changes (look for `REFUSED` in the logs). A firewall rule on the host restricting port 8883 to the box's IP gives the same protection.
 - Commands only come from your Mosquitto: protect it with a username/password, otherwise any LAN device can publish on `aldes/vmc/cmd/...` and control the VMC directly.
 
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+```
+
+The end-to-end tests start the bridge as a subprocess against [amqtt](https://github.com/Yakifo/amqtt) (a pure-Python MQTT broker standing in for Mosquitto) and fake Connect Boxes speaking MQTT over TLS. They run on Linux (one test connects from `127.0.0.2`). CI runs them on every pull request, along with a Docker build and start-up check.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — full data flow

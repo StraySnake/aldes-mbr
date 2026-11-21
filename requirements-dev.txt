@@ -1,0 +1,5 @@
+# Test and lint dependencies (not needed to run the bridge).
+-r requirements.txt
+pytest>=8,<10
+amqtt==0.12.2   # pure-Python MQTT broker, stands in for Mosquitto in the end-to-end tests
+ruff>=0.6,<1

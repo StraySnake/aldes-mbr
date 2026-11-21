@@ -1,0 +1,13 @@
+# Tooling config only (the project is not packaged).
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Real bugs only: syntax errors, pyflakes (unused/undefined names), bugbear.
+select = ["E9", "F", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
