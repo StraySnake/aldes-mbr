@@ -38,6 +38,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 - Home Assistant with the MQTT integration configured against the same Mosquitto
 - An Aldes Connect Box already paired on your WiFi (use [`tools/aldes_pair.py`](tools/aldes_pair.py) if you can't pair via the app)
 - The Connect Box's **MAC address** (12 hex chars, prefix usually `28:9C:6E`)
+- **Time for the box**: it must reach its NTP server, or a local one through a redirection (see [Box clock (NTP)](#box-clock-ntp)). Without it, holidays and the weekly schedule do not work.
 
 ### Setup
 
@@ -73,15 +74,20 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 5. **Wait for the box to reconnect** (a few minutes, or power-cycle it). You should see in the logs:
    ```
-   NEW CONNECTION from <box-IP>:xxxxx
-   CONNECT proto=MQTT level=4 client_id=XXXXXXXXXXXX_AIR
-   SUBSCRIBE topic = devices/XXXXXXXXXXXX_AIR/messages/devicebound/#
-   PUBLISH ... payload = {"outside_tpt":..., "current_mode":"V", ...}
+   NEW CONNECTION from ('<box-IP>', xxxxx)
+   ('<box-IP>', xxxxx) TLS TLSv1.2 AES256-SHA256
+   ('<box-IP>', xxxxx) CONNECT proto=MQTT level=4 keepalive=180
+   ('<box-IP>', xxxxx)   client_id = XXXXXXXXXXXX_AIR
+   ('<box-IP>', xxxxx) SUBSCRIBE pkt_id=...
+   ('<box-IP>', xxxxx) PUBLISH qos=1 topic=devices/XXXXXXXXXXXX_AIR/messages/events/ (408b)
    ```
+   If `client_id` is not `<DEVICE_MAC>_AIR`, the log says so: check `DEVICE_MAC`.
 
-6. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Other entities: **Début / Fin des vacances** (published by the bridge when holidays start, since the box does not report them), **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
+6. **Check the box's clock** (see [Box clock (NTP)](#box-clock-ntp)): the date of the `se=` value in the `password` line must be today's date, not 2016.
 
-7. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
+7. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Other entities: **Début / Fin des vacances** (published by the bridge when holidays start, since the box does not report them), **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
+
+8. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
 
 ## Mode mapping (validated empirically on Dee Fly Cube)
 
@@ -95,6 +101,8 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 ⚠️ **Y/X are inverted compared to InspirAir documentation** — measured on a Dee Fly Cube. If you have a different Aldes model, run the broker and watch which mode produces what flow before trusting these labels.
 
+The flows above come from one installation. On another one, the reported flows (`extf_flw`, `ffe_flw`) stayed at 105 m³/h in every mode while the speed setpoint (`set_spd`: 0 holidays, 1 daily, 2 guests) and the fan speeds did change: rely on *Vitesse demandée* and *Dernière commande* to check a mode change.
+
 ## Macros
 
 The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that translate to the proper Aldes JSON-RPC payload server-side (e.g. computing the holiday date range automatically):
@@ -106,10 +114,12 @@ The broker exposes high-level macros at `aldes/vmc/cmd/macro/<name>` that transl
 | `boost` / `x` | mode X (V4) |
 | `vacances` / `vacances<N>j` (e.g. `vacances1j`, `vacances21j`) | mode W with auto dates (now − 1 min → now + N days, 1–365) |
 | `vacances_stop` | cancel holidays: back to the mode used before them (Quotidien if unknown) |
-
-Holidays rely on the box's clock, which is only set by NTP from a hard-coded address (see [docs/PROTOCOL.md](docs/PROTOCOL.md#observed-behaviour-of-the-box-dee-fly-cube-logs-of-a-real-installation)). If the box cannot reach it, its clock stays in 2016 and holiday commands are acknowledged but never start.
 | `programme` / `z` | mode Z (schedule) |
 | `override_on` / `override_off` | `changeCMO 1` / `changeCMO 0` |
+
+Holidays and the weekly schedule rely on the box's clock: see [Box clock (NTP)](#box-clock-ntp). If the box cannot set its clock, holiday commands are acknowledged but never start.
+
+The Aldes app cancels holidays with a special date range that a real box ignores; `vacances_stop` switches back to the previous mode instead, which works.
 
 ### Command confirmation
 
@@ -121,6 +131,46 @@ The box sends a telemetry frame about 5 s after each command, so a mode change i
 
 Publish commands with `retain=false`: retained messages on `aldes/vmc/cmd/#` are ignored (they would otherwise be replayed to the box every time the bridge reconnects).
 
+## Box clock (NTP)
+
+The Connect Box does not keep the time across reboots: **at every boot its clock restarts at a fixed date in November 2016**, and the only way it sets the time is NTP, from a **hard-coded IP address: `61.164.36.105`, UDP port 123** (no DNS lookup, so a local NTP server announced by DHCP is ignored). It retries about every 24 s until it gets an answer.
+
+If the box cannot reach that address (a firewall rule blocking its Internet access, for example), its clock stays in 2016:
+
+- **holidays never start**: a holiday range dated today is years in the box's future, so the command is acknowledged (*Reçue par la box*) but the box stays in its current mode (*Échec* after one resend);
+- **the weekly schedule (Programme) runs at wrong days and hours**.
+
+### Fix
+
+Choose one, on your router or firewall:
+
+1. **Redirect it to a local NTP server (recommended, keeps the box off the Internet).** Add a destination NAT (port forward) rule: from the box's IP, UDP, destination `61.164.36.105` port 123 → your router's or NTP server's address, port 123. The box thinks it talks to its server; your local server answers.
+
+   On **OPNsense**: *Services → Network Time → General*, listen on the box's interface; then *Firewall → NAT → Port Forward*, add: interface = the box's VLAN, protocol UDP, source = box IP, destination = `61.164.36.105` (or *any*), port 123, redirect target = OPNsense's address on that VLAN, port 123, filter rule association = *Add associated filter rule*.
+
+2. **Allow only that traffic out**: a *pass* rule for UDP 123 from the box's IP to `61.164.36.105`, before any rule blocking its Internet access. Simpler, but it depends on a server abroad that may stop answering.
+
+Your firewall log shows whether the box is blocked: look for UDP packets from the box's IP to `61.164.36.105:123`.
+
+### Check
+
+The box writes its own time into its credentials at each connection: the `se=` (expiry) value of the `password` line in the bridge's log. After fixing NTP, power-cycle the box and wait for it to reconnect, then:
+
+```bash
+docker compose logs | grep -o "se=[0-9]*" | tail -1
+```
+
+Convert the number (replace `<value>`):
+
+```bash
+date -u -d @<value>
+```
+
+- **2016**: the box has not set its clock yet (still blocked, or not reconnected since).
+- **Today's date** (expiry ahead by some hours): the clock is set. Holidays now start within seconds (*Confirmée*, *Début / Fin des vacances* shown in HA).
+
+The box goes back to 2016 after every power cut and sets its clock again as soon as NTP answers, so keep the rule in place.
+
 ## Security
 
 The box cannot be authenticated: its SAS token is signed with an Aldes key we do not have. What the broker does:
@@ -128,6 +178,7 @@ The box cannot be authenticated: its SAS token is signed with an Aldes key we do
 - The first packet of a connection must be `CONNECT`, and only `PUBLISH`es from the session whose client_id is `DEVICE_ID`, on its own `devices/<DEVICE_ID>/...` topics, are relayed to Mosquitto. Other clients are logged but cannot inject values into Home Assistant.
 - **`DEVICE_IP` (optional, recommended)**: connections from any other IP are closed immediately. Without it, a device on your LAN that knows the box's MAC (visible in any ARP table) can connect with its client_id, take over the session and receive your commands instead of the box. Reserve the box's IP in your DHCP server before setting it, otherwise the bridge stops accepting the box when its IP changes (look for `REFUSED` in the logs). A firewall rule on the host restricting port 8883 to the box's IP gives the same protection.
 - Commands only come from your Mosquitto: protect it with a username/password, otherwise any LAN device can publish on `aldes/vmc/cmd/...` and control the VMC directly.
+- The box does not need Internet access once the bridge is set up, except NTP (see [Box clock (NTP)](#box-clock-ntp)). Isolating it (its own VLAN, outbound traffic blocked) is a good idea; with the NTP redirection, it can stay fully offline.
 
 ## Operations
 
