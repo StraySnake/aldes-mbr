@@ -12,10 +12,12 @@
 
 services:
   aldes-mqtt-bridge:
-    # Use the published image (recommended)
-    image: ghcr.io/djo1338/aldes-mqtt-bridge:latest
-    # Or build from source instead:
-    # build: .
+    # Build the image from this repository (recommended: it always matches the code
+    # you cloned). Update with: git pull && docker compose up -d --build
+    build: .
+    # Or use the image published by this repository's CI instead of building
+    # (GitHub may keep it private until the owner makes the package public):
+    # image: ghcr.io/straysnake/aldes-mbr:latest
     container_name: aldes-mqtt-bridge
     restart: unless-stopped
     init: true           # forwards SIGTERM properly -> fast, clean `docker compose stop`
