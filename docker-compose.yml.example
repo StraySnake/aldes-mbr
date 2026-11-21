@@ -32,6 +32,12 @@ services:
       # === REQUIRED ===
       DEVICE_MAC: "AA:BB:CC:DD:EE:FF"
 
+      # === Recommended: only accept the box's IP ===
+      # Without it, any device on your LAN can impersonate the box (fake telemetry,
+      # stealing the session). Reserve the box's IP in your DHCP server FIRST:
+      # if its IP changes, the bridge refuses it ("REFUSED" in the logs).
+      # DEVICE_IP: "192.168.1.50"
+
       # === Upstream Mosquitto (where telemetry is republished) ===
       UPSTREAM_MQTT_HOST: "127.0.0.1"
       UPSTREAM_MQTT_PORT: "1883"
