@@ -19,7 +19,9 @@ sys.path.insert(0, str(REPO))
 
 # fake_iothub reads its config at import time (unit tests import it directly).
 os.environ.setdefault("DEVICE_MAC", DEVICE_MAC)
-os.environ.setdefault("LOG_FILE", str(Path(tempfile.gettempdir()) / "aldes-test-import.log"))
+_IMPORT_DIR = Path(tempfile.mkdtemp(prefix="aldes-test-"))
+os.environ.setdefault("LOG_FILE", str(_IMPORT_DIR / "mitm.log"))
+os.environ.setdefault("CERT_DIR", str(_IMPORT_DIR))  # default /data is not writable in CI
 
 
 def free_port():
