@@ -85,6 +85,10 @@ BOX_TOPIC_PREFIX = f"devices/{DEVICE_ID}/"
 CMD_TOPIC = f"{PREFIX}/cmd/devices/{DEVICE_ID}/messages/devicebound"
 # Availability: "online" while the bridge is up AND the box has an active session.
 STATUS_TOPIC = f"{PREFIX}/status"
+# ISO 8601 time of the last frame received from the box (retained).
+LAST_SEEN_TOPIC = f"{PREFIX}/last_seen"
+# The box's telemetry topic, as published by the box (without our prefix).
+BOX_EVENTS = f"devices/{DEVICE_ID}/messages/events/"
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("LISTEN_PORT", "8883"))  # the box always uses 8883; override for tests
@@ -287,6 +291,43 @@ class Session:
             pass
 
 
+# ---------- telemetry merge ----------
+#
+# The box sends two kinds of frames on the same topic: a short boot heartbeat
+# (firmware, RSSI...) right after connecting, and the full telemetry every 1-5 min.
+# Republishing the heartbeat as-is would turn every sensor to "unknown" until the
+# next full frame, so each frame is merged into the last known values instead.
+
+_telemetry = {}
+_telemetry_lock = threading.Lock()
+
+
+def merge_telemetry(frame):
+    """Merge a decoded frame into the last known values; returns the merged dict."""
+    with _telemetry_lock:
+        _telemetry.update(frame)
+        return dict(_telemetry)
+
+
+def seed_telemetry(values):
+    """Initial values (from Mosquitto's retained copy) after a restart of the bridge.
+    Ignored once the box has sent something: live data wins."""
+    with _telemetry_lock:
+        if _telemetry:
+            return False
+        _telemetry.update(values)
+        return True
+
+
+def decode_frame(msg):
+    """JSON object of a telemetry frame, or None if it is not one."""
+    try:
+        frame = json.loads(msg)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return frame if isinstance(frame, dict) else None
+
+
 def box_online():
     with _sessions_lock:
         return DEVICE_ID in sessions
@@ -309,6 +350,8 @@ class UpstreamBridge:
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
+        # Our own retained telemetry, read back once to seed the merge after a restart.
+        self.client.message_callback_add(EVENTS_TOPIC, self._on_seed)
         self.cmd_callbacks = []  # list of fn(topic, payload) called when user injects a cmd
         self._status_lock = threading.Lock()  # keeps "compute status" + "publish" atomic
         # connect_async + loop_start: paho keeps retrying in the background, so the bridge
@@ -324,11 +367,25 @@ class UpstreamBridge:
         log(f"upstream MQTT connected to {UPSTREAM_HOST}:{UPSTREAM_PORT}")
         # Subscribe to command-injection topic so HA can publish e.g. aldes/vmc/cmd/macro/boost
         client.subscribe(f"{PREFIX}/cmd/#")
+        with _telemetry_lock:
+            need_seed = not _telemetry
+        if need_seed:
+            client.subscribe(EVENTS_TOPIC)
         publish_ha_discovery(client)
         self.publish_status()
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         log(f"upstream MQTT disconnected: {reason_code} (will retry)")
+
+    def _on_seed(self, client, userdata, msg):
+        # First message on our telemetry topic: the retained copy if there is one,
+        # otherwise our own next publish. Either way, one is enough.
+        client.unsubscribe(EVENTS_TOPIC)
+        if not msg.retain:
+            return
+        values = decode_frame(msg.payload)
+        if values and seed_telemetry(values):
+            log(f"telemetry merge seeded with {len(values)} values from the retained copy")
 
     def _on_message(self, client, userdata, msg):
         if msg.retain:
@@ -440,9 +497,25 @@ def publish_ha_discovery(client):
         topic = f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
 
+    # Last frame received from the box. No availability on purpose: it is most useful
+    # precisely when the box is offline ("silent since ...").
+    client.publish(
+        f"{HA_DISCO_PREFIX}/sensor/{base_id}/last_seen/config",
+        json.dumps({
+            "name": "Dernière mise à jour",
+            "unique_id": f"{base_id}_last_seen",
+            "state_topic": LAST_SEEN_TOPIC,
+            "device_class": "timestamp",
+            "icon": "mdi:clock-check-outline",
+            "device": DEVICE_BLOCK,
+        }),
+        qos=1, retain=True,
+    )
+
     # Mode select. "Vacances" auto-resolves now -> now+1d via the macro translator
-    # (date math is hard in Jinja). The boot heartbeat has no current_mode: keep the
-    # previous state in that case (HA ignores an empty template output).
+    # (date math is hard in Jinja). Frames are merged, so current_mode is normally
+    # always there; if not (first frame ever is a heartbeat), output nothing: HA keeps
+    # the previous state on an empty template output.
     mode_map = json.dumps(MODES, ensure_ascii=False).replace('"', "'")
     mode_select_cfg = {
         "name": "Mode",
@@ -491,7 +564,7 @@ def publish_ha_discovery(client):
             json.dumps(cfg), qos=1, retain=True,
         )
 
-    log(f"HA discovery: {len(SENSORS)} sensors + 1 select + {len(macros)} buttons")
+    log(f"HA discovery: {len(SENSORS) + 1} sensors + 1 select + {len(macros)} buttons")
 
 
 # ---------- per-client MQTT handler ----------
@@ -638,8 +711,14 @@ def handle_client(raw_sock, addr):
                 if sess.client_id != DEVICE_ID or not topic.startswith(BOX_TOPIC_PREFIX):
                     log(f"{addr}   not relayed (only {BOX_TOPIC_PREFIX}... from client_id {DEVICE_ID})")
                 elif bridge:
+                    if topic == BOX_EVENTS:
+                        frame = decode_frame(msg)
+                        if frame is not None:
+                            msg = json.dumps(merge_telemetry(frame), ensure_ascii=False)
                     bridge.publish(f"raw/{topic.replace('$', '_').replace('#', '_').replace('+', '_')}",
                                    msg, retain=True)
+                    bridge.publish("last_seen", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                   retain=True)
 
             elif ptype == SUBSCRIBE:
                 pkt_id = struct.unpack_from(">H", payload, 0)[0]

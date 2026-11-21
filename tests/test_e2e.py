@@ -9,8 +9,32 @@ import pytest
 from helpers import DEVICE_ID, EVENTS, FakeBox, publish_pkt, remaining_length, wait
 
 RAW = f"aldes/vmc/raw/{EVENTS}"
+LAST_SEEN = "aldes/vmc/last_seen"
 STATUS = "aldes/vmc/status"
 DEVICEBOUND = f"aldes/vmc/cmd/devices/{DEVICE_ID}/messages/devicebound"
+
+
+def frames(mqtt_client):
+    """Decoded telemetry frames republished by the bridge (skips retained clears and
+    non-JSON payloads)."""
+    out = []
+    for p in mqtt_client.payloads(RAW):
+        try:
+            f = json.loads(p)
+        except ValueError:
+            continue
+        if isinstance(f, dict):
+            out.append(f)
+    return out
+
+
+def last_frame(mqtt_client):
+    f = frames(mqtt_client)
+    return f[-1] if f else {}
+
+
+def any_frame_has(mqtt_client, key, value):
+    return any(f.get(key) == value for f in frames(mqtt_client))
 
 
 @pytest.fixture
@@ -25,7 +49,7 @@ def box(bridge):
 
 def test_telemetry_relayed_and_status_online(bridge, box, mqtt_client):
     box.publish(EVENTS, b'{"outside_tpt": 12.5}')
-    assert wait(lambda: mqtt_client.last(RAW) == '{"outside_tpt": 12.5}')
+    assert wait(lambda: last_frame(mqtt_client).get("outside_tpt") == 12.5)
     assert wait(lambda: mqtt_client.last(STATUS) == "online")
 
 
@@ -63,7 +87,7 @@ def test_commands_in_order_during_telemetry_stream(bridge, box, mqtt_client):
     assert ok
     assert [r for r in box.rx if r.startswith("cmd")] == [f"cmd{i}" for i in range(200)]
     # every telemetry frame made it to Mosquitto
-    assert wait(lambda: len(mqtt_client.payloads(RAW)) >= len(sent), 10)
+    assert wait(lambda: len(frames(mqtt_client)) >= len(sent), 10)
 
 
 # ---------- retained commands ----------
@@ -127,7 +151,7 @@ def test_intruder_client_id_not_relayed(bridge, box, mqtt_client):
     intruder = FakeBox(bridge.port, cid="intruder")
     intruder.publish(EVENTS, b'{"outside_tpt": 99}')
     assert wait(lambda: "not relayed" in bridge.log())
-    assert '{"outside_tpt": 99}' not in mqtt_client.payloads(RAW)
+    assert not any_frame_has(mqtt_client, "outside_tpt", 99)
     assert not box.closed.is_set()  # the real box keeps its session
     intruder.close()
 
@@ -137,7 +161,7 @@ def test_publish_before_connect_closes_connection(bridge, mqtt_client):
     b.send(publish_pkt(EVENTS, b'{"outside_tpt": 77}'))
     assert b.closed.wait(5)
     assert "before CONNECT" in bridge.log()
-    assert '{"outside_tpt": 77}' not in mqtt_client.payloads(RAW)
+    assert not any_frame_has(mqtt_client, "outside_tpt", 77)
 
 
 def test_device_ip_filter(start_bridge, mqtt_client):
@@ -150,7 +174,7 @@ def test_device_ip_filter(start_bridge, mqtt_client):
 
     good = FakeBox(bridge.port, source_ip="127.0.0.2")
     good.publish(EVENTS, b'{"outside_tpt": 21}')
-    assert wait(lambda: '{"outside_tpt": 21}' in mqtt_client.payloads(RAW))
+    assert wait(lambda: any_frame_has(mqtt_client, "outside_tpt", 21))
     mqtt_client.publish("aldes/vmc/cmd/macro/quotidien", "1")
     assert wait(lambda: good.received('"V"'))
     good.close()
@@ -178,3 +202,75 @@ def test_clean_shutdown_publishes_offline(bridge, box, mqtt_client, sig):
     assert time.monotonic() - t0 < 4
     assert wait(lambda: mqtt_client.last(STATUS) == "offline")
     assert "shutting down" in bridge.log()
+
+
+# ---------- telemetry merge and last update ----------
+
+FULL = {"modemid": "AABBCCDDEEFF", "Vers_W": "21", "RSSI": "--%%", "outside_tpt": 22.2,
+        "ext_tpt": 21.0, "current_mode": "V", "extf_flw": 165}
+HEARTBEAT = {"modemid": "AABBCCDDEEFF", "Vers_W": "22", "RSSI": "--%%", "week_planning": " ", "Vers_UC": 53}
+
+
+def test_heartbeat_merged_into_last_telemetry(bridge, box, mqtt_client):
+    box.publish(EVENTS, json.dumps(FULL).encode())
+    assert wait(lambda: last_frame(mqtt_client).get("outside_tpt") == 22.2)
+    box.publish(EVENTS, json.dumps(HEARTBEAT).encode())
+    assert wait(lambda: last_frame(mqtt_client).get("Vers_UC") == 53)
+    merged = last_frame(mqtt_client)
+    assert merged["outside_tpt"] == 22.2 and merged["current_mode"] == "V"  # kept
+    assert merged["Vers_W"] == "22"  # updated by the newer frame
+    box.publish(EVENTS, json.dumps({"outside_tpt": 18.0}).encode())
+    assert wait(lambda: last_frame(mqtt_client).get("outside_tpt") == 18.0)
+    assert last_frame(mqtt_client)["Vers_UC"] == 53
+
+
+def test_non_json_frame_relayed_unchanged(bridge, box, mqtt_client):
+    box.publish(EVENTS, b"not json")
+    assert wait(lambda: mqtt_client.last(RAW) == "not json")
+
+
+def test_merge_survives_bridge_restart(start_bridge, mqtt_client):
+    bridge1 = start_bridge()
+    b = FakeBox(bridge1.port)
+    b.publish(EVENTS, json.dumps(FULL).encode())
+    assert wait(lambda: last_frame(mqtt_client).get("outside_tpt") == 22.2)
+    b.close()
+    bridge1.stop()
+
+    bridge2 = start_bridge(clear=False)  # Mosquitto still holds the merged frame
+    assert wait(lambda: "seeded with" in bridge2.log())
+    b = FakeBox(bridge2.port)
+    b.publish(EVENTS, json.dumps(HEARTBEAT).encode())
+    assert wait(lambda: last_frame(mqtt_client).get("Vers_UC") == 53)
+    assert last_frame(mqtt_client)["outside_tpt"] == 22.2
+    b.close()
+
+
+def test_last_seen_published_and_discovered(bridge, box, mqtt_client, mqtt_port):
+    from datetime import datetime, timedelta, timezone
+
+    from conftest import Recorder
+
+    box.publish(EVENTS, json.dumps(HEARTBEAT).encode())
+    assert wait(lambda: mqtt_client.last(LAST_SEEN))
+    seen = datetime.fromisoformat(mqtt_client.last(LAST_SEEN))
+    assert seen.tzinfo is not None
+    assert abs(datetime.now(timezone.utc) - seen) < timedelta(seconds=10)
+
+    cfg_topic = "homeassistant/sensor/aldes_vmc_AABBCCDDEEFF/last_seen/config"
+    rec = Recorder(mqtt_port, "disco-reader")
+    rec.client.subscribe("homeassistant/#", qos=1)
+    assert wait(lambda: rec.last(cfg_topic))
+    cfg = json.loads(rec.last(cfg_topic))
+    rec.close()
+    assert cfg["device_class"] == "timestamp" and cfg["state_topic"] == LAST_SEEN
+    assert "availability_topic" not in cfg  # must stay visible while the box is offline
+
+
+def test_rejected_publish_does_not_update_last_seen(bridge, mqtt_client):
+    intruder = FakeBox(bridge.port, cid="intruder")
+    intruder.publish(EVENTS, b"{}")
+    assert wait(lambda: "not relayed" in bridge.log())
+    time.sleep(0.5)
+    assert not mqtt_client.last(LAST_SEEN)
+    intruder.close()
