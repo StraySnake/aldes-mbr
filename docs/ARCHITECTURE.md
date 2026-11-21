@@ -17,7 +17,7 @@
           │  password  = SharedAccessSignature ...
           ▼
 ┌──────────────────────────────────────────────┐
-│  fake_iothub.py (this project)               │
+│  aldes_bridge (this project)                 │
 │  - TLS server with self-signed cert,         │
 │    legacy ciphers (SECLEVEL=0)               │
 │  - Decodes MQTT 3.1.1 frames                 │
@@ -55,7 +55,24 @@ The HF-LPB100 firmware in the Aldes Connect Box has a few oversights that make t
 
 ## Component breakdown
 
-### `fake_iothub.py`
+### `aldes_bridge/` package
+
+`fake_iothub.py` is only a launcher (`python fake_iothub.py`, Docker `CMD`); `python -m aldes_bridge` does the same.
+
+| Module | Role |
+|---|---|
+| `config.py` | all environment variables, read once at import (invalid values stop the bridge) |
+| `logs.py` | `log()` with levels, rotating file, SAS token redaction |
+| `tls.py` | self-signed certificate, legacy TLS context offered to the box |
+| `mqtt_codec.py` | MQTT 3.1.1 encoding/decoding helpers |
+| `box.py` | box connections: sessions, packet handling, PUBLISH relay, `DEVICE_IP` filter |
+| `telemetry.py` | merge of the box's frames |
+| `macros.py` | modes (`MODES`) and macro → JSON-RPC translation |
+| `commands.py` | routing of commands from Mosquitto, `CommandTracker` |
+| `upstream.py` | `UpstreamBridge`, the connection to Mosquitto |
+| `discovery.py` | Home Assistant MQTT discovery |
+| `app.py` | `main()`: wiring, accept loop, health file, shutdown |
+| `runtime.py` | the few objects shared at runtime (bridge, TLS context, command tracker) |
 
 - **`gen_cert()`**: creates a self-signed TLS cert with CN=`aldesiotsuite.azure-devices.net` and SAN=`*.azure-devices.net`. Stored in `/data/` for persistence across container restarts.
 - **MQTT 3.1.1 codec**: minimal hand-rolled parser. Only the packet types we care about (CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, PUBACK, PINGREQ, DISCONNECT). No retained message handling, no QoS 2 — the box doesn't need them. Packets larger than 64 kB and a second CONNECT on the same connection close the connection.
@@ -65,7 +82,7 @@ The HF-LPB100 firmware in the Aldes Connect Box has a few oversights that make t
 - **`CommandTracker`**: commands are QoS 0, so mode changes are confirmed through the telemetry. After a command, the next frame carrying `current_mode` (ignoring frames received within 3 s, possibly sampled before the change) either confirms it or triggers one resend; a second mismatch reports a failure. No frame within `CMD_CONFIRM_TIMEOUT` → "unconfirmed". Programme (`Z`) and `changeCMO` cannot be checked and are reported as "sent". The outcome goes to `aldes/vmc/command_result` (retained JSON).
 - **Health**: a thread rewrites `HEALTH_FILE` every 10 s (`ok` when Mosquitto is connected); `healthcheck.py`, the Docker `HEALTHCHECK`, fails when the file says otherwise or is older than 60 s.
 - **`publish_ha_discovery()`**: on every connection to Mosquitto, publishes ~29 retained config messages on `homeassistant/{sensor,select,button}/aldes_vmc_<MAC>/<id>/config`. HA auto-creates the entities.
-- **`_macro_payload()`**: translates high-level macros (`vacances1j`, `boost`, etc.) to the actual Aldes JSON-RPC payload, including computing UTC date strings for holiday mode.
+- **`macro_payload()`**: translates high-level macros (`vacances1j`, `boost`, etc.) to the actual Aldes JSON-RPC payload, including computing UTC date strings for holiday mode.
 
 ### `network_mode: host`
 

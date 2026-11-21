@@ -5,6 +5,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
  && useradd --system --uid 1000 --user-group --no-create-home --shell /usr/sbin/nologin aldes \
  && mkdir -p /data /logs && chown aldes:aldes /data /logs
 COPY fake_iothub.py healthcheck.py docker-entrypoint.sh /app/
+COPY aldes_bridge/ /app/aldes_bridge/
 EXPOSE 8883
 VOLUME ["/data"]
 ENV CERT_DIR=/data

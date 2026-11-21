@@ -93,7 +93,7 @@ def tls_mqtt_port(tmp_path_factory):
     import shutil
     work = tmp_path_factory.mktemp("amqtt-tls")
     # self-signed cert for CN=aldesiotsuite.azure-devices.net (not 127.0.0.1)
-    subprocess.run([sys.executable, "-c", "import fake_iothub as f; f.gen_cert()"], cwd=REPO, check=True,
+    subprocess.run([sys.executable, "-c", "from aldes_bridge.tls import gen_cert; gen_cert()"], cwd=REPO, check=True,
                    env=dict(os.environ, CERT_DIR=str(work), LOG_FILE=str(work / "gen.log")),
                    capture_output=True)
     port = free_port()

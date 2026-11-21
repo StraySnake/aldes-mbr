@@ -32,7 +32,7 @@ jobs:
         run: ruff check --output-format=github .
 
       - name: Compile
-        run: python -m py_compile fake_iothub.py tools/aldes_pair.py
+        run: python -m compileall -q aldes_bridge fake_iothub.py healthcheck.py tools
 
       - name: Tests
         run: pytest
@@ -83,7 +83,7 @@ jobs:
           mkdir -p data
           # old images ran as root: cert and key end up root-owned, key mode 600
           docker run --rm -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF --user 0 \
-            --entrypoint python aldes-mqtt-bridge:ci -c "import fake_iothub as f; f.gen_cert()"
+            --entrypoint python aldes-mqtt-bridge:ci -c "from aldes_bridge.tls import gen_cert; gen_cert()"
           sudo stat -c '%U %a %n' data/*
           docker run -d --name upgraded -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF aldes-mqtt-bridge:ci
           for _ in $(seq 1 20); do
