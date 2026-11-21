@@ -1,14 +1,15 @@
-"""Unit tests of the pure functions of fake_iothub.py (no network)."""
+"""Unit tests of the pure functions of the aldes_bridge package (no network)."""
 import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import fake_iothub as fi
+from aldes_bridge import commands, config, logs, macros
+from aldes_bridge import mqtt_codec as codec
 
 
 def mode_of(macro):
-    payload = fi._macro_payload(macro)
+    payload = macros.macro_payload(macro)
     return json.loads(payload)["params"][0] if payload else None
 
 
@@ -42,19 +43,19 @@ def test_holiday_durations(macro, days):
 
 @pytest.mark.parametrize("macro", ["vacances0j", "vacances366j", "vacancesxj", "unknown", ""])
 def test_invalid_macros(macro):
-    assert fi._macro_payload(macro) is None
+    assert macros.macro_payload(macro) is None
 
 
 def test_holiday_stop_and_override():
     assert mode_of("vacances_stop") == "W" + "00010101000000Z" * 2
-    assert json.loads(fi._macro_payload("override_on")) == {"method": "changeCMO", "params": [1]}
-    assert json.loads(fi._macro_payload("override_off")) == {"method": "changeCMO", "params": [0]}
+    assert json.loads(macros.macro_payload("override_on")) == {"method": "changeCMO", "params": [1]}
+    assert json.loads(macros.macro_payload("override_off")) == {"method": "changeCMO", "params": [0]}
 
 
 def test_every_select_option_maps_to_its_own_mode():
     """The HA select sends its label as the macro name: each label must round-trip."""
-    assert set(fi.SELECT_OPTIONS) == set(fi.MODES.values())
-    for code, label in fi.MODES.items():
+    assert set(macros.SELECT_OPTIONS) == set(macros.MODES.values())
+    for code, label in macros.MODES.items():
         assert mode_of(label)[0] == code, label
 
 
@@ -69,37 +70,37 @@ class FakeSock:
 
 @pytest.mark.parametrize("n", [0, 1, 127, 128, 16383, 16384, 2097151, 2097152, 268435455])
 def test_remaining_length_roundtrip(n):
-    assert fi.read_remaining_length(FakeSock(fi.encode_remaining_length(n))) == n
+    assert codec.read_remaining_length(FakeSock(codec.encode_remaining_length(n))) == n
 
 
 def test_remaining_length_malformed():
     with pytest.raises(ValueError):
-        fi.read_remaining_length(FakeSock(b"\xff\xff\xff\xff\x01"))
+        codec.read_remaining_length(FakeSock(b"\xff\xff\xff\xff\x01"))
 
 
 def test_recv_exact_raises_on_truncated_data():
-    with pytest.raises(fi.ConnectionClosed):
-        fi.recv_exact(FakeSock(b"abc"), 5)
+    with pytest.raises(codec.ConnectionClosed):
+        codec.recv_exact(FakeSock(b"abc"), 5)
 
 
 def test_string_roundtrip():
-    s, off = fi.parse_string(fi.encode_string("devices/é") + b"rest", 0)
-    assert s == "devices/é" and off == len(fi.encode_string("devices/é"))
+    s, off = codec.parse_string(codec.encode_string("devices/é") + b"rest", 0)
+    assert s == "devices/é" and off == len(codec.encode_string("devices/é"))
 
 
 def test_redact_password():
     sas = b"SharedAccessSignature sr=hub%2Fdevices%2Fx&sig=AbC%2B123%3D&se=1700000000"
-    red = fi.redact_password(sas)
+    red = logs.redact_password(sas)
     assert "AbC" not in red and "sig=<redacted>" in red and "se=1700000000" in red
-    other = fi.redact_password(b"supersecretpassword")
+    other = logs.redact_password(b"supersecretpassword")
     assert "secretpassword" not in other
 
 
 def test_parse_allowed_ips():
-    assert fi._parse_allowed_ips("") == set()
-    assert fi._parse_allowed_ips(" 192.168.1.50 , 10.0.0.1,") == {"192.168.1.50", "10.0.0.1"}
+    assert config.parse_allowed_ips("") == set()
+    assert config.parse_allowed_ips(" 192.168.1.50 , 10.0.0.1,") == {"192.168.1.50", "10.0.0.1"}
     with pytest.raises(SystemExit):
-        fi._parse_allowed_ips("192.168.1.300")
+        config.parse_allowed_ips("192.168.1.300")
 
 
 @pytest.mark.parametrize("macro,expected", [
@@ -109,11 +110,11 @@ def test_parse_allowed_ips():
     ("override_on", None),    # changeCMO: not reported in the telemetry
 ])
 def test_expected_mode_of_macros(macro, expected):
-    assert fi.expected_mode(fi._macro_payload(macro)) == expected
+    assert commands.expected_mode(macros.macro_payload(macro)) == expected
 
 
 @pytest.mark.parametrize("payload", [b"not json", b"{}", b'{"method":"changeMode","params":[]}',
                                      b'{"method":"changeMode","params":[1]}',
                                      b'{"method":"changeMode","params":["Q"]}'])
 def test_expected_mode_of_unverifiable_payloads(payload):
-    assert fi.expected_mode(payload) is None
+    assert commands.expected_mode(payload) is None

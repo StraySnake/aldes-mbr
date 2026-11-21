@@ -1,4 +1,4 @@
-"""Docker HEALTHCHECK: healthy when fake_iothub.py wrote "ok" to its health file recently.
+"""Docker HEALTHCHECK: healthy when the bridge wrote "ok" to its health file recently.
 
 The broker rewrites the file every 10 s; "ok" means its main loop is alive and the
 upstream Mosquitto is connected. Exit code 0 = healthy, 1 = unhealthy.

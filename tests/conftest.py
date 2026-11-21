@@ -17,7 +17,7 @@ from helpers import DEVICE_MAC, EVENTS, wait
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-# fake_iothub reads its config at import time (unit tests import it directly).
+# aldes_bridge.config reads the env at import time (unit tests import the package directly).
 os.environ.setdefault("DEVICE_MAC", DEVICE_MAC)
 _IMPORT_DIR = Path(tempfile.mkdtemp(prefix="aldes-test-"))
 os.environ.setdefault("LOG_FILE", str(_IMPORT_DIR / "mitm.log"))
