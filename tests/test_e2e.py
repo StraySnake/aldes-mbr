@@ -226,9 +226,18 @@ def test_heartbeat_merged_into_last_telemetry(bridge, box, mqtt_client):
     assert last_frame(mqtt_client)["Vers_UC"] == 53
 
 
-def test_non_json_frame_relayed_unchanged(bridge, box, mqtt_client):
-    box.publish(EVENTS, b"not json")
-    assert wait(lambda: mqtt_client.last(RAW) == "not json")
+def test_invalid_frame_does_not_replace_telemetry(bridge, box, mqtt_client):
+    # Seen on a real box, twice a night: a truncated frame that is not JSON.
+    box.publish(EVENTS, json.dumps({"outside_tpt": 9.5, "current_mode": "V"}).encode())
+    assert wait(lambda: last_frame(mqtt_client).get("outside_tpt") == 9.5)
+    n_raw = len(mqtt_client.payloads(RAW))
+    seen_before = len(mqtt_client.payloads(LAST_SEEN))
+    box.publish(EVENTS, b'{"modemid":"AABBCCDDEEFF","productid":"AABBCCDDEEFF_AIR",+++}')
+    assert wait(lambda: "invalid telemetry frame ignored" in bridge.log())
+    assert wait(lambda: len(mqtt_client.payloads(LAST_SEEN)) > seen_before)  # still alive
+    time.sleep(0.3)
+    assert len(mqtt_client.payloads(RAW)) == n_raw  # retained telemetry untouched
+    assert last_frame(mqtt_client).get("outside_tpt") == 9.5
 
 
 def test_merge_survives_bridge_restart(start_bridge, mqtt_client):

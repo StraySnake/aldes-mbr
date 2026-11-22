@@ -96,6 +96,20 @@ Sent every ~10 min (and ~5 s after each command):
 - Telemetry also reports `Vers_UC` (e.g. 26) and `Vers_W` as a Unix timestamp (e.g. `1544745600.0` = 2018-12-14), not the `"21"` shown above.
 - MQTT CONNECT: keepalive **180 s**, clean session, SAS token as password; subscribes to `devices/<id>/messages/devicebound/#` with QoS 1.
 - Telemetry: a ~410-byte frame every **10 min** (QoS 1), **plus one about 5 s after each command** it receives.
+- A few times a day it also sends a **truncated, invalid frame**, e.g. `{"modemid":"…","productid":"…",+++}`. The bridge ignores it (only "last update" is refreshed) so that it does not replace the retained telemetry.
+- After a mode change, the frame sent ~5 s later already has the new `current_mode` and `set_spd`, but flows, fan speeds and `echange_pwr` follow about a minute later (next frames).
+
+### Telemetry fields, from 13 h of frames of one Dee Fly Cube
+
+| Field | Observed | Meaning |
+|---|---|---|
+| `extf_flw`, `ffe_flw` | always identical, and only 105 (V), 195 (Y), 210 (X) m³/h | **flow setpoint of the mode** (configured per installation), not a measurement. Holidays (W) stayed at 105 over 4 min, so the holiday flow may equal the daily one here. |
+| `set_spd` | 0 W, 1 V, 2 Y, 3 X | speed step of the mode |
+| `echange_pwr` | 441–475 at 105 m³/h, 825–910 at 210 m³/h, inside 23.5 °C, outside 9.5 °C | **heat recovered by the exchanger, in W**: 0.34 × flow × ΔT × ~0.9 gives 450 W and 900 W |
+| `extf_spd`, `vi_spd` | 2159–2585 / 1539–1663 rpm at 105 m³/h; ~2900 / ~2800 rpm at 195–210 m³/h | extract / supply fan speeds (rpm) |
+| `cve_csn`, `vi_csn` | 27–42 / 13–20 at 105 m³/h; 93–99 / 83–92 at 195–210 m³/h, never above 100 | follow the extract / supply fan exactly. Most likely the **fan command in %** ("csn" = consigne): doubling it at the top only adds ~10 % rpm, as a fan near its maximum speed does; electrical power could not double for +10 % rpm. Not confirmed. |
+| `tte_csn` | 2790, constant over 13 h and across all modes | not a counter (it would have moved). A setting; meaning unknown. |
+| `ff_cpt`, `dep_ind`, `dtb_ind` | always 0 | unknown; maybe filter counter, defrost, bypass: watch them when the filter alarm shows, on frosty nights, on hot days. |
 - **Its clock is wrong.** The `se` (expiry) of the SAS token it generates at each connection is in November 2016, follows real time from there, and goes back to the same 2016 date after a reboot: the box counts time since boot from a fixed date until it reaches its NTP server. **That server is a hard-coded IP address, `61.164.36.105` (UDP 123)**, queried about every 24 s while unsynchronised: no DNS lookup, so a local NTP server announced by DHCP is not used. If outbound traffic from the box is blocked, its clock stays in 2016. Consequence: a holiday range dated now (2026) is in the box's future, so `changeMode W…` is acknowledged but not applied (and a weekly schedule runs at wrong times). Fix: let it reach that address, or better, redirect UDP 123 from the box to a local NTP server with a destination NAT rule on the router.
 - **It reads a packet id in every PUBLISH it receives, even QoS 0 ones, and sends a PUBACK for it.** With a QoS 0 command, the first 2 bytes of the payload (`{"`) are taken as the packet id (PUBACK id `0x7b22`) and the command it parses starts with `method":…`. Mode changes seemed to work anyway (its parser is lenient), but commands are now sent with QoS 1, which gives it a real packet id and makes the PUBACK a receipt.
 
