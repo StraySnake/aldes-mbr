@@ -34,6 +34,10 @@ SENSORS = [
     ("supply_flow",         "Débit insufflation",    "ffe_flw",     {"unit_of_measurement": "m³/h", "icon": "mdi:fan-chevron-up", "state_class": "measurement"}),
     ("extract_speed",       "Vitesse extraction",    "extf_spd",    {"unit_of_measurement": "rpm", "icon": "mdi:fan", "state_class": "measurement"}),
     ("supply_speed",        "Vitesse insufflation",  "vi_spd",      {"unit_of_measurement": "rpm", "icon": "mdi:fan", "state_class": "measurement"}),
+    # Fan commands ("csn" = consigne): 13-42 % in daily mode, 83-99 % in boost on a real
+    # box, never above 100, and saturating like a fan near its maximum speed.
+    ("extract_fan_command", "Commande ventilateur extraction",  "cve_csn", {"unit_of_measurement": "%", "icon": "mdi:fan-chevron-down", "state_class": "measurement"}),
+    ("supply_fan_command",  "Commande ventilateur insufflation", "vi_csn", {"unit_of_measurement": "%", "icon": "mdi:fan-chevron-up", "state_class": "measurement"}),
     ("exchanger_power",     "Puissance échangeur",   "echange_pwr", {"device_class": "power", "unit_of_measurement": "W", "state_class": "measurement"}),
     ("set_speed",           "Vitesse demandée",      "set_spd",     {"icon": "mdi:speedometer", "state_class": "measurement"}),
     # Air quality probes are optional: 0 when the unit has none. Disabled by default
@@ -59,10 +63,10 @@ UNKNOWN_FIELDS = [
     ("ff_cpt",  "maybe a filter counter"),
     ("dep_ind", ""),
     ("dtb_ind", "maybe the bypass state"),
-    ("cve_csn", "maybe the extract fan consumption"),
-    ("vi_csn",  "maybe the supply fan consumption"),
-    ("tte_csn", "maybe a total consumption"),
+    ("tte_csn", "a constant setting (2790)"),
 ]
+# Fields identified since: their old "Champ ... (inconnu)" entities are removed from HA.
+IDENTIFIED_FIELDS = ["cve_csn", "vi_csn"]
 
 def publish_ha_discovery(client):
     """Publish HA MQTT Discovery configs for all VMC entities. Called on each upstream connect."""
@@ -86,6 +90,10 @@ def publish_ha_discovery(client):
             cfg["expire_after"] = SENSOR_EXPIRE_AFTER
         topic = f"{HA_DISCO_PREFIX}/sensor/{base_id}/{obj_id}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
+
+    # An empty retained config removes the entity from HA.
+    for key in IDENTIFIED_FIELDS:
+        client.publish(f"{HA_DISCO_PREFIX}/sensor/{base_id}/raw_{key}/config", "", qos=1, retain=True)
 
     # Unknown fields (see UNKNOWN_FIELDS)
     for key, _hint in UNKNOWN_FIELDS:
