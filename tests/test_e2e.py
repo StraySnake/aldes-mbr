@@ -293,8 +293,9 @@ def discovery(mqtt_port):
     from conftest import Recorder
     rec = Recorder(mqtt_port, "disco-reader")
     rec.client.subscribe("homeassistant/#", qos=1)
-    # 25 sensors + 1 binary sensor + 1 select + 9 buttons (+ 2 empty configs removing old entities)
-    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 36)
+    # 25 sensors + 2 binary sensors + 1 select + 9 buttons. (The empty configs removing old
+    # entities delete the retained message: a new subscriber does not receive them.)
+    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 37)
     rec.close()
     return {t: json.loads(rec.last(t)) for t in rec.msgs if t.startswith("homeassistant/") and rec.last(t)}
 
@@ -323,12 +324,13 @@ def test_discovery_optional_unknown_and_firmware_sensors(bridge, mqtt_port):
     # Vers_W is a Unix timestamp on recent boxes: shown as a date
     assert "timestamp_custom" in cfgs[f"{base}/fw_wifi/config"]["value_template"]
     # unknown fields exposed as disabled diagnostic sensors
-    for key in ("ff_cpt", "dep_ind", "dtb_ind", "tte_csn"):
+    for key in ("dep_ind", "dtb_ind", "tte_csn"):
         cfg = cfgs[f"{base}/raw_{key}/config"]
         assert cfg["enabled_by_default"] is False and cfg["entity_category"] == "diagnostic"
         assert key in cfg["value_template"]
     # identified fields: named sensors in %, enabled; the old "unknown" entities are removed
-    for obj, key in (("extract_fan_command", "cve_csn"), ("supply_fan_command", "vi_csn")):
+    for obj, key in (("extract_fan_command", "cve_csn"), ("supply_fan_command", "vi_csn"),
+                     ("filter_life", "ff_cpt")):
         cfg = cfgs[f"{base}/{obj}/config"]
         assert cfg["unit_of_measurement"] == "%" and key in cfg["value_template"]
         assert "enabled_by_default" not in cfg
@@ -638,3 +640,10 @@ def test_intruder_does_not_change_box_clock(bridge, box, mqtt_client):
 def test_box_clock_binary_sensor_discovered(bridge, mqtt_port):
     cfg = discovery(mqtt_port)["homeassistant/binary_sensor/aldes_vmc_AABBCCDDEEFF/box_clock/config"]
     assert cfg["device_class"] == "problem" and cfg["state_topic"] == CLOCK
+
+
+def test_filter_life_and_filter_change(bridge, box, mqtt_port):
+    cfgs = discovery(mqtt_port)
+    cfg = cfgs["homeassistant/binary_sensor/aldes_vmc_AABBCCDDEEFF/filter_change/config"]
+    assert cfg["device_class"] == "problem" and "ff_cpt" in cfg["value_template"]
+    assert cfgs["homeassistant/sensor/aldes_vmc_AABBCCDDEEFF/filter_life/config"]["unit_of_measurement"] == "%"
