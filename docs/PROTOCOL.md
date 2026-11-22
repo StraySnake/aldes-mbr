@@ -181,7 +181,7 @@ Single integer (0 or 1). When `1`, the box stays on the current mode and ignores
 - `day` is `0`–`6` (Sunday–Saturday).
 - `mode` is one of `V/W/X/Y/Z` (and `B`/`C` for products with heating/cooling).
 
-We don't use this in `aldes-mqtt-bridge` directly — Home Assistant handles scheduling.
+We don't use this in `aldes-mbr` directly — Home Assistant handles scheduling.
 
 ### Other commands seen in the APK (not used by this project)
 

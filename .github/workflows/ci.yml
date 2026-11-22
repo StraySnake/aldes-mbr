@@ -54,13 +54,13 @@ jobs:
           context: .
           push: false
           load: true
-          tags: aldes-mqtt-bridge:ci
+          tags: aldes-mbr:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Starts as non-root, exits cleanly on docker stop
         run: |
-          docker run -d --name bridge -e DEVICE_MAC=AABBCCDDEEFF aldes-mqtt-bridge:ci
+          docker run -d --name bridge -e DEVICE_MAC=AABBCCDDEEFF aldes-mbr:ci
           for _ in $(seq 1 20); do
             docker logs bridge 2>&1 | grep -q "listening on" && break
             sleep 1
@@ -83,9 +83,9 @@ jobs:
           mkdir -p data
           # old images ran as root: cert and key end up root-owned, key mode 600
           docker run --rm -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF --user 0 \
-            --entrypoint python aldes-mqtt-bridge:ci -c "from aldes_bridge.tls import gen_cert; gen_cert()"
+            --entrypoint python aldes-mbr:ci -c "from aldes_bridge.tls import gen_cert; gen_cert()"
           sudo stat -c '%U %a %n' data/*
-          docker run -d --name upgraded -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF aldes-mqtt-bridge:ci
+          docker run -d --name upgraded -v "$PWD/data:/data" -e DEVICE_MAC=AABBCCDDEEFF aldes-mbr:ci
           for _ in $(seq 1 20); do
             docker logs upgraded 2>&1 | grep -q "listening on" && break
             sleep 1
@@ -99,7 +99,7 @@ jobs:
         run: |
           docker run -d --name mosquitto --network host eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
           docker run -d --name healthy --network host -e DEVICE_MAC=AABBCCDDEEFF -e LISTEN_PORT=18883 \
-            aldes-mqtt-bridge:ci
+            aldes-mbr:ci
           for _ in $(seq 1 30); do
             docker exec healthy python /app/healthcheck.py && break
             sleep 1

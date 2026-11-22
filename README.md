@@ -1,6 +1,8 @@
-# aldes-mqtt-bridge
+# aldes-mbr
 
 > Local control of Aldes Connect ventilation units (VMC / HRV) via Home Assistant — bypassing the unreliable Aldes cloud.
+
+aldes-mbr is a fork of [djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge), released under the same [MIT license](LICENSE).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/ghcr.io-aldes--mbr-blue?logo=docker)](https://github.com/StraySnake/aldes-mbr/pkgs/container/aldes-mbr)
@@ -49,7 +51,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    cp docker-compose.yml.example docker-compose.yml
    ```
 
-   **Coming from djo1338/aldes-mqtt-bridge?** Stop the old container first, from its own folder: `docker compose down` (or `docker rm -f aldes-mqtt-bridge`). Both use port 8883 and the same container name. Copy your settings (`DEVICE_MAC`, `UPSTREAM_MQTT_*`, `DEVICE_NAME`) into the new `docker-compose.yml`, and keep `build: .`: the old `image: ghcr.io/djo1338/...` line would run the old code. Home Assistant keeps the same entities.
+   **Coming from djo1338/aldes-mqtt-bridge?** Stop the old container first, from its own folder: `docker compose down` (or `docker rm -f aldes-mqtt-bridge`). Both use port 8883. If you reuse your old `docker-compose.yml`, its service and container may keep the old name `aldes-mqtt-bridge`: that works, the example now uses `aldes-mbr`. Copy your settings (`DEVICE_MAC`, `UPSTREAM_MQTT_*`, `DEVICE_NAME`) into the new `docker-compose.yml`, and keep `build: .`: the old `image: ghcr.io/djo1338/...` line would run the old code. Home Assistant keeps the same entities.
 
 2. **Edit `docker-compose.yml`**: set `DEVICE_MAC` and `UPSTREAM_MQTT_HOST` (your Mosquitto IP). Recommended: reserve the box's IP in your DHCP server and set `DEVICE_IP` to it (see [Security](#security)).
 
@@ -215,6 +217,7 @@ Use at your own risk. The author is not affiliated with Aldes. Aldes may change 
 
 ## Credits
 
+- **[djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge)** — the original project this fork is based on (fake Azure IoT Hub broker, protocol reverse engineering, Home Assistant integration)
 - **[zongyl/smartLink](https://github.com/zongyl/smartLink)** — Hi-Flying SmartLink V3 Java reference (used for `tools/aldes_pair.py`)
 - **[The-Smartest-Home/hass_inspirair](https://github.com/The-Smartest-Home/hass_inspirair)** — InspirAir Modbus register map (referenced during early reverse engineering)
 - **[skylot/jadx](https://github.com/skylot/jadx)** — APK decompiler used to map the JSON-RPC commands
