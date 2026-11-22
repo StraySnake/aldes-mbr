@@ -152,6 +152,33 @@ def publish_ha_discovery(client):
         qos=1, retain=True,
     )
 
+    # Bypass: when it is open, the air skips the heat exchanger and echange_pwr drops to 0
+    # (seen on a real box: 0 W during the whole bypass period, ~430 W before and after).
+    # With less than 2 °C between inside and outside the exchanger recovers ~nothing anyway:
+    # unknown rather than a false "open". dtb_ind does NOT follow the bypass (255 once closed).
+    client.publish(
+        f"{HA_DISCO_PREFIX}/binary_sensor/{base_id}/bypass/config",
+        json.dumps({
+            "name": "By-pass ouvert",
+            "unique_id": f"{base_id}_bypass",
+            "state_topic": EVENTS_TOPIC,
+            "value_template": (
+                "{% set p = value_json.echange_pwr | default(none) %}"
+                "{% set f = value_json.extf_flw | default(0) %}"
+                "{% set ti = value_json.ext_tpt | default(none) %}"
+                "{% set te = value_json.outside_tpt | default(none) %}"
+                "{% if p is none or ti is none or te is none or f | float(0) <= 0"
+                " or (ti | float(0) - te | float(0)) | abs < 2 %}None"
+                "{% elif p | float(0) <= 0 %}ON{% else %}OFF{% endif %}"
+            ),
+            "device_class": "opening",
+            "icon": "mdi:valve",
+            "device": DEVICE_BLOCK,
+            **AVAILABILITY,
+        }),
+        qos=1, retain=True,
+    )
+
     # Filter to change: "Problème" when the remaining filter life (ff_cpt) is 0, like the
     # alert of the unit's remote. Unknown while no frame has carried the field.
     client.publish(
@@ -261,4 +288,4 @@ def publish_ha_discovery(client):
         )
 
     n_sensors = len(SENSORS) + len(UNKNOWN_FIELDS) + 4
-    log(f"HA discovery: {n_sensors} sensors + 2 binary sensors + 1 select + {len(macros)} buttons")
+    log(f"HA discovery: {n_sensors} sensors + 3 binary sensors + 1 select + {len(macros)} buttons")

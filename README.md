@@ -72,7 +72,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    docker compose up -d --build
    docker compose logs -f
    ```
-   The first lines show the version you run: `HA discovery: 25 sensors + 2 binary sensors + 1 select + 9 buttons`.
+   The first lines show the version you run: `HA discovery: 25 sensors + 3 binary sensors + 1 select + 9 buttons`.
 
 5. **Wait for the box to reconnect** (a few minutes, or power-cycle it). You should see in the logs:
    ```
@@ -132,6 +132,7 @@ Any other [macro](#macros) can be sent by publishing on `aldes/vmc/cmd/macro/<na
 | Début / Fin des vacances | current holiday range, published by the bridge (the box does not report it); empty outside holidays |
 | Horloge de la box | *OK* / *Problème*: whether the box's clock is set (NTP), checked at each connection |
 | Filtre (durée de vie restante) | `ff_cpt`, % of filter life left: 0 when the unit's remote asks to change the filter; should go back to 100 after a filter change and a reset of the filter timer on the unit |
+| By-pass ouvert | *Ouvert* when the heat exchanger recovers nothing while air flows (`echange_pwr` = 0), i.e. the bypass is open; unknown when inside and outside differ by less than 2 °C. The bypass cannot be commanded through the box: its preference (auto / favour cool / favour heat) is set with the unit's remote |
 | Filtre à changer | *Problème* when the filter life is 0, like the remote's alert: a good trigger for a notification |
 | Firmware WiFi / Firmware MCU | `Vers_W` (build date, e.g. 2018-12-14) / `Vers_UC` (e.g. 26) |
 | Signal WiFi | `RSSI`; absent from some boxes' frames, **disabled by default** |
