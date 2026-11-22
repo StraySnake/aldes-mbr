@@ -38,6 +38,9 @@ SENSORS = [
     # box, never above 100, and saturating like a fan near its maximum speed.
     ("extract_fan_command", "Commande ventilateur extraction",  "cve_csn", {"unit_of_measurement": "%", "icon": "mdi:fan-chevron-down", "state_class": "measurement"}),
     ("supply_fan_command",  "Commande ventilateur insufflation", "vi_csn", {"unit_of_measurement": "%", "icon": "mdi:fan-chevron-up", "state_class": "measurement"}),
+    # Remaining filter life: 0 on a real box whose remote showed "filter 0, change it";
+    # 50 in the Aldes app's demo data. Back to 100 after a filter change and timer reset.
+    ("filter_life",         "Filtre (durée de vie restante)", "ff_cpt", {"unit_of_measurement": "%", "icon": "mdi:air-filter", "state_class": "measurement"}),
     ("exchanger_power",     "Puissance échangeur",   "echange_pwr", {"device_class": "power", "unit_of_measurement": "W", "state_class": "measurement"}),
     ("set_speed",           "Vitesse demandée",      "set_spd",     {"icon": "mdi:speedometer", "state_class": "measurement"}),
     # Air quality probes are optional: 0 when the unit has none. Disabled by default
@@ -60,13 +63,12 @@ SENSORS = [
 # default) so they can be compared with real observations and named later. The guesses
 # come from the field names only.
 UNKNOWN_FIELDS = [
-    ("ff_cpt",  "maybe a filter counter"),
     ("dep_ind", ""),
     ("dtb_ind", "maybe the bypass state"),
     ("tte_csn", "a constant setting (2790)"),
 ]
 # Fields identified since: their old "Champ ... (inconnu)" entities are removed from HA.
-IDENTIFIED_FIELDS = ["cve_csn", "vi_csn"]
+IDENTIFIED_FIELDS = ["cve_csn", "vi_csn", "ff_cpt"]
 
 def publish_ha_discovery(client):
     """Publish HA MQTT Discovery configs for all VMC entities. Called on each upstream connect."""
@@ -146,6 +148,26 @@ def publish_ha_discovery(client):
             "json_attributes_topic": CMD_RESULT_TOPIC,
             "icon": "mdi:message-check-outline",
             "device": DEVICE_BLOCK,
+        }),
+        qos=1, retain=True,
+    )
+
+    # Filter to change: "Problème" when the remaining filter life (ff_cpt) is 0, like the
+    # alert of the unit's remote. Unknown while no frame has carried the field.
+    client.publish(
+        f"{HA_DISCO_PREFIX}/binary_sensor/{base_id}/filter_change/config",
+        json.dumps({
+            "name": "Filtre à changer",
+            "unique_id": f"{base_id}_filter_change",
+            "state_topic": EVENTS_TOPIC,
+            "value_template": (
+                "{% set v = value_json.ff_cpt | default(none) %}"
+                "{% if v is none %}None{% elif v | int <= 0 %}ON{% else %}OFF{% endif %}"
+            ),
+            "device_class": "problem",
+            "icon": "mdi:air-filter",
+            "device": DEVICE_BLOCK,
+            **AVAILABILITY,
         }),
         qos=1, retain=True,
     )
@@ -239,4 +261,4 @@ def publish_ha_discovery(client):
         )
 
     n_sensors = len(SENSORS) + len(UNKNOWN_FIELDS) + 4
-    log(f"HA discovery: {n_sensors} sensors + 1 binary sensor + 1 select + {len(macros)} buttons")
+    log(f"HA discovery: {n_sensors} sensors + 2 binary sensors + 1 select + {len(macros)} buttons")
