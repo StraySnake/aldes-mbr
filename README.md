@@ -87,9 +87,67 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 
 6. **Check the box's clock** (see [Box clock (NTP)](#box-clock-ntp)): the date of the `se=` value in the `password` line must be today's date, not 2016.
 
-7. **Open Home Assistant** — an "Aldes VMC" device should appear automatically with all sensors and a Mode select (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode` with the default `DEVICE_NAME`). Entities show as *unavailable* while the box is not connected to the bridge (availability topic `aldes/vmc/status`), except **Dernière mise à jour** (`sensor.aldes_vmc_derniere_mise_a_jour`), the time of the last frame received from the box: it stays visible so you can alert on a silent VMC, e.g. "last update more than 1 h ago". Sensors also turn *unavailable* if no frame arrives for 30 min, i.e. 3 missed frames (`SENSOR_EXPIRE_AFTER`, in seconds, `0` to disable), instead of showing frozen values. Diagnostic entities: **Horloge de la box** (*Problème* while the box's clock is not set, see [Box clock (NTP)](#box-clock-ntp)), *Firmware WiFi* shown as its build date, and four **Champ … (inconnu)** sensors for telemetry fields not identified yet (`ff_cpt`, `dep_ind`, `dtb_ind`, `tte_csn`), disabled by default: enable them to help identify them. **Commande ventilateur extraction / insufflation** (%) show the fan commands (`cve_csn`, `vi_csn`; see [docs/PROTOCOL.md](docs/PROTOCOL.md#telemetry-fields-from-13-h-of-frames-of-one-dee-fly-cube)). *CO₂*, *PM2.5*, *COV* (0 without the optional probes) and *Signal WiFi* are disabled by default too. Other entities: **Début / Fin des vacances** (published by the bridge when holidays start, since the box does not report them), **Dernière commande** (see [Command confirmation](#command-confirmation)) and the **Ignorer le programme / Suivre le programme** buttons (`changeCMO`).
+7. **Open Home Assistant** — an "Aldes VMC" device appears automatically (entity IDs `sensor.aldes_vmc_*`, `select.aldes_vmc_mode`… with the default `DEVICE_NAME`). See [Data in Home Assistant](#data-in-home-assistant) for what each entity means.
 
 8. **Optional**: copy [`examples/homeassistant/dashboard.yaml`](examples/homeassistant/dashboard.yaml) into your Lovelace, and [`examples/homeassistant/automations.yaml`](examples/homeassistant/automations.yaml) for a sample night/day cycle automation.
+
+## Data in Home Assistant
+
+Everything below is published through MQTT discovery under one device, "Aldes VMC" (`DEVICE_NAME`). Typical values come from a Dee Fly Cube at about 23 °C inside and 10 °C outside.
+
+### Measurements
+
+| Entity | Telemetry field | Unit | Meaning, typical values |
+|---|---|---|---|
+| Air extérieur | `outside_tpt` | °C | outdoor air entering the unit |
+| Air intérieur (extrait) | `ext_tpt` | °C | indoor air extracted from the house |
+| Air rejeté | `reject_tpt` | °C | air blown outside after the heat exchanger (≈ 15 °C when outside is 10 °C) |
+| Débit extraction / Débit insufflation | `extf_flw` / `ffe_flw` | m³/h | **flow setpoint of the current mode**, not a measurement: e.g. 105 (Quotidien), 195 (Invités), 210 (Boost); it changes about a minute after the mode |
+| Vitesse extraction / Vitesse insufflation | `extf_spd` / `vi_spd` | rpm | fan speeds, e.g. ~2300 / ~1600 rpm at 105 m³/h, ~2900 / ~2800 rpm at 210 m³/h |
+| Commande ventilateur extraction / insufflation | `cve_csn` / `vi_csn` | % | fan commands, e.g. ~30 / ~14 % at 105 m³/h, ~97 / ~91 % in Boost (meaning deduced from the data, see [PROTOCOL.md](docs/PROTOCOL.md#telemetry-fields-from-13-h-of-frames-of-one-dee-fly-cube)) |
+| Puissance échangeur | `echange_pwr` | W | heat recovered by the exchanger (≈ 0.34 × flow × ΔT × efficiency): ~460 W at 105 m³/h, ~880 W at 210 m³/h |
+| Vitesse demandée | `set_spd` | — | speed step of the mode: 0 Vacances, 1 Quotidien, 2 Invités, 3 Boost |
+| CO₂, PM2.5, COV | `Co2_vmc`, `Pm25_Vmc`, `Voc_Vmc` | ppm, µg/m³, — | only with the optional air quality probes (0 otherwise); **disabled by default** |
+
+Sensors turn *unavailable* when the box is disconnected, or after 30 min without telemetry (`SENSOR_EXPIRE_AFTER`).
+
+### Control
+
+| Entity | Type | Effect |
+|---|---|---|
+| Mode | select | Quotidien, Invités, Boost, Vacances (1 day), Programme; shows the mode reported by the box (`current_mode`) |
+| Quotidien, Invités, Boost, Programme | buttons | switch mode |
+| Vacances 1 jour / 7 jours | buttons | holidays from now for 1 / 7 days (needs the box's clock, see [Box clock (NTP)](#box-clock-ntp)) |
+| Annuler vacances | button | ends holidays by restoring the mode used before them |
+| Ignorer le programme / Suivre le programme | buttons | `changeCMO 1` / `0`: stay on the current mode or follow the weekly schedule; the box does not report this state |
+
+Any other [macro](#macros) can be sent by publishing on `aldes/vmc/cmd/macro/<name>`.
+
+### Status and diagnostics
+
+| Entity | Meaning |
+|---|---|
+| Dernière commande | outcome of the last command: *En attente*, *Reçue par la box*, *Confirmée*, *Renvoyée*, *Échec*, *Non confirmée*, *Envoyée*, *Box déconnectée*, *Refusée : horloge de la box non réglée* (see [Command confirmation](#command-confirmation)); attributes: command, expected and reported mode |
+| Dernière mise à jour | time of the last frame received from the box; stays available when the box is offline, for "VMC silent for 1 h" alerts |
+| Début / Fin des vacances | current holiday range, published by the bridge (the box does not report it); empty outside holidays |
+| Horloge de la box | *OK* / *Problème*: whether the box's clock is set (NTP), checked at each connection |
+| Firmware WiFi / Firmware MCU | `Vers_W` (build date, e.g. 2018-12-14) / `Vers_UC` (e.g. 26) |
+| Signal WiFi | `RSSI`; absent from some boxes' frames, **disabled by default** |
+| Champ ff_cpt / dep_ind / dtb_ind / tte_csn (inconnu) | fields not identified yet, **disabled by default**: always 0 so far, except `tte_csn` (a constant, 2790). Enable them and watch them when the filter alarm shows, on frosty nights or hot days (bypass), to help identify them |
+
+### MQTT topics (for other home automation systems)
+
+With the default prefix `aldes/vmc`:
+
+| Topic | Content |
+|---|---|
+| `aldes/vmc/raw/devices/<DEVICE_ID>/messages/events/` | latest telemetry, JSON, retained; each frame merged with the previous ones |
+| `aldes/vmc/status` | `online` / `offline` (box connected to the bridge), retained, with LWT |
+| `aldes/vmc/last_seen` | ISO 8601 time of the last frame, retained |
+| `aldes/vmc/command_result` | JSON outcome of the last command, retained |
+| `aldes/vmc/holiday` | JSON `{"start", "end"}` of the current holidays, `{}` otherwise, retained |
+| `aldes/vmc/box_clock` | JSON `{"synced", "token_expiry", "checked_at"}`, retained |
+| `aldes/vmc/cmd/macro/<name>` | send a [macro](#macros) (publish with `retain=false`) |
 
 ## Mode mapping (validated empirically on Dee Fly Cube)
 
