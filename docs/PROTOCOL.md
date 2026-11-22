@@ -111,7 +111,7 @@ Sent every ~10 min (and ~5 s after each command):
 | `tte_csn` | 2790 for at least 14 h, then 2791 (11:34 the next day) | a slow counter, maybe days of operation (≈ 7.6 years). To confirm with the next increments. |
 | `ff_cpt` | 0, while the unit's remote showed "filter 0 %, change it"; 50 in the Aldes app's demo data | **remaining filter life in %**. Exposed as *Filtre (durée de vie restante)* and *Filtre à changer*. |
 | `dep_ind` | always 0 | unknown; maybe defrost: watch it on frosty nights. |
-| `dtb_ind` | 0 for a day; 55–255, changing at every frame, once the remote was set to "favour cool"; 255 just after switching to "favour heat" (bypass closed) | moves with the cooling preference of the remote, but is **not** the bypass state. Unknown. |
+| `dtb_ind` | 0 for a day; 55–255, changing at every frame, once the comfort mode was set to "favour cool"; 255 just after switching to "favour heat" (bypass closed) | moves with the comfort mode, but is **not** the bypass state; maybe related to the comfort mode itself. Unknown. |
 - **Its clock is wrong.** The `se` (expiry) of the SAS token it generates at each connection is in November 2016, follows real time from there, and goes back to the same 2016 date after a reboot: the box counts time since boot from a fixed date until it reaches its NTP server. **That server is a hard-coded IP address, `61.164.36.105` (UDP 123)**, queried about every 24 s while unsynchronised: no DNS lookup, so a local NTP server announced by DHCP is not used. If outbound traffic from the box is blocked, its clock stays in 2016. Consequence: a holiday range dated now (2026) is in the box's future, so `changeMode W…` is acknowledged but not applied (and a weekly schedule runs at wrong times). Fix: let it reach that address, or better, redirect UDP 123 from the box to a local NTP server with a destination NAT rule on the router.
 - **It reads a packet id in every PUBLISH it receives, even QoS 0 ones, and sends a PUBACK for it.** With a QoS 0 command, the first 2 bytes of the payload (`{"`) are taken as the packet id (PUBACK id `0x7b22`) and the command it parses starts with `method":…`. Mode changes seemed to work anyway (its parser is lenient), but commands are now sent with QoS 1, which gives it a real packet id and makes the PUBACK a receipt.
 
@@ -208,14 +208,14 @@ By being the broker ourselves, we don't have this problem: when we receive a com
 
 ## What the Aldes Connect app knows (version 4.21)
 
-The string table of the Android app (APK 4.21, read without running it) lists every command it can send to a Connect Box: `changeMode`, `changeCMO`, `changePlanningMode` (variants A–D), `changeTemperatureReference` and `prixkwh`, built from three command types only (string, on/off override, temperature). There is **no bypass command**: the word does not appear in Aldes' code, and the "Rafraîchissement" / heating and cooling screens, the `COOLING_*` / `HEATING_*` modes, the temperature setpoints and the A–D programs all belong to the T.One heat pump. The bypass setting of a Dee Fly Cube (auto / favour heat / favour cool) is made with the unit's remote, which talks to the unit directly, not through the Connect Box.
+The string table of the Android app (APK 4.21, read without running it) lists every command it can send to a Connect Box: `changeMode`, `changeCMO`, `changePlanningMode` (variants A–D), `changeTemperatureReference` and `prixkwh`, built from three command types only (string, on/off override, temperature). There is **no bypass command**: the word does not appear in Aldes' code, and the "Rafraîchissement" / heating and cooling screens, the `COOLING_*` / `HEATING_*` modes, the temperature setpoints and the A–D programs all belong to the T.One heat pump. The comfort mode of a Dee Fly Cube (favour heat / favour cool / auto), which drives its bypass, is set with the unit's remote, which talks to the unit directly, not through the Connect Box.
 
 The app has a **filter alert** for InspirAir / Dee Fly Cube ("reset the filter timer on your unit" after a change), consistent with `ff_cpt` being the remaining filter life. Its demo data (`assets/indicators/inspir_air_demo.json`) also names fields not sent by the box observed here: `AIR_TII_EST`, `AIR_EXTF_TSN`, `AIR_VV_TSN`, `AIR_EXCH_ENG`, and probe values (`AIR_TEMP_CAPT`, `AIR_HYGR_CAPT`, `AIR_CO2_CAPT`, …).
 
 
-## Bypass: what the telemetry shows
+## Bypass and comfort mode: what the telemetry shows
 
-The bypass preference (auto / favour cool / favour heat) is set with the unit's remote; the Connect Box has no command for it (see above). Its effect is visible in the telemetry. On a real Dee Fly Cube, 23.5 °C inside and 10.5 °C outside, after setting the remote to "favour cool":
+Two settings are independent: the **ventilation flow profile** (`current_mode`: V, W, X, Y, Z), set through the box, and the **comfort mode** (favour heat / favour cool / auto, in the Aldes manual), set with the unit's remote only, which decides when the bypass opens. The box has no command for the comfort mode (see above) and reports it nowhere directly, but its effects are visible. On a real Dee Fly Cube, 23.5 °C inside and 10.5 °C outside, after setting the comfort mode to "favour cool":
 
 | | Before | "Favour cool" (≈ 13:00–14:09): bypass open | "Favour heat" (from 14:09) |
 |---|---|---|---|
@@ -223,7 +223,7 @@ The bypass preference (auto / favour cool / favour heat) is set with the unit's 
 | `reject_tpt` | 15.5 °C | 19.0–19.5 °C | 15.1 °C |
 | flows | 105 m³/h | **210 m³/h**, fans at 96–100 %, even after switching to Quotidien (V) | 105 m³/h |
 
-The change shows in the frame sent right after the remote is set (here 14:09:43 for "favour heat"). With "favour cool" and a warm house, the unit opens the bypass and also runs at maximum flow, whatever the mode; "favour heat" closes it at once. The bridge's *By-pass ouvert* binary sensor uses `echange_pwr = 0` while air flows (unknown when inside and outside differ by less than 2 °C).
+The change shows in the frame sent right after the remote is set (here 14:09:43 for "favour heat"). With "favour cool" and a warm house, the unit opened the bypass and cooled at 210 m³/h, above the flow of the profile: `current_mode` was not changed (it stayed `Y`, then became `V` when Quotidien was selected, while the flow stayed at 210 m³/h). "Favour heat" closed the bypass at once and the flow went back to the profile's. The bridge's *By-pass ouvert* binary sensor uses `echange_pwr = 0` while air flows (unknown when inside and outside differ by less than 2 °C).
 
 ## Other observations
 

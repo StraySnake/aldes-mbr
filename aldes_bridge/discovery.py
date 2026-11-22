@@ -238,7 +238,9 @@ def publish_ha_discovery(client):
     # the previous state on an empty template output.
     mode_map = json.dumps(MODES, ensure_ascii=False).replace('"', "'")
     mode_select_cfg = {
-        "name": "Mode",
+        # Name from the Aldes manual: the ventilation flow profile (current_mode). Not to be
+        # confused with the comfort mode (favour heat / cool / auto, remote only).
+        "name": "Débit de ventilation",
         "unique_id": f"{base_id}_mode",
         "state_topic": EVENTS_TOPIC,
         "value_template": (
