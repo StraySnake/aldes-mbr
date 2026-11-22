@@ -1,14 +1,14 @@
 # Copy this file to docker-compose.yml and adjust for your setup.
 #
 # Pre-requisites:
-#   - Pi-hole (or any DNS) configured to rewrite:
+#   - a local DNS (Pi-hole, Unbound, AdGuard...) configured to rewrite:
 #       aldesiotsuite.azure-devices.net -> <this host's IP>
 #   - An MQTT broker (Mosquitto) reachable for republishing telemetry
 #   - The Connect Box already paired on your WiFi
 #
 # DEVICE_MAC is REQUIRED. Find it via:
-#   nslookup HF-LPB100      (if box on local DNS)
-#   arp -a                  (look for prefix 28:9C:6E)
+#   your DHCP server's leases, or `nslookup HF-LPB100` (if the box is in your local DNS)
+#   then `arp -a` on a machine of the same network
 
 services:
   aldes-mbr:
@@ -21,7 +21,7 @@ services:
     container_name: aldes-mbr
     restart: unless-stopped
     init: true           # forwards SIGTERM properly -> fast, clean `docker compose stop`
-    logging:             # cap Docker's own log (the broker logs every telemetry frame)
+    logging:             # cap Docker's own log (large with LOG_LEVEL=debug)
       driver: json-file
       options:
         max-size: "10m"

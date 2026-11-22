@@ -63,9 +63,9 @@ SENSORS = [
 # default) so they can be compared with real observations and named later. The guesses
 # come from the field names only.
 UNKNOWN_FIELDS = [
-    ("dep_ind", ""),
-    ("dtb_ind", "maybe the bypass state"),
-    ("tte_csn", "a constant setting (2790)"),
+    ("dep_ind", "always 0 so far; maybe defrost"),
+    ("dtb_ind", "0, then 55-255 once the comfort mode is changed on the remote; not the bypass state"),
+    ("tte_csn", "a slow counter (2790, then 2791 a day later)"),
 ]
 # Fields identified since: their old "Champ ... (inconnu)" entities are removed from HA.
 IDENTIFIED_FIELDS = ["cve_csn", "vi_csn", "ff_cpt"]
