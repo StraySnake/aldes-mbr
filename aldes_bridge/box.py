@@ -273,15 +273,25 @@ def handle_client(raw_sock, addr):
                 if sess.client_id != DEVICE_ID or not topic.startswith(BOX_TOPIC_PREFIX):
                     log(f"{addr}   not relayed (only {BOX_TOPIC_PREFIX}... from client_id {DEVICE_ID})")
                 elif runtime.bridge:
+                    relay = True
                     if topic == BOX_EVENTS:
                         frame = decode_frame(msg)
                         if frame is not None:
                             msg = json.dumps(merge_telemetry(frame), ensure_ascii=False)
                             runtime.commands.on_frame(frame)
-                    runtime.bridge.publish(f"raw/{topic.replace('$', '_').replace('#', '_').replace('+', '_')}",
-                                   msg, retain=True)
+                        else:
+                            # The box sometimes sends truncated frames, e.g.
+                            # {"modemid":"...","productid":"...",+++}. Republishing them would
+                            # replace the retained telemetry: every HA sensor would turn
+                            # "unknown" until the next frame (10 min).
+                            relay = False
+                            log(f"{addr}   invalid telemetry frame ignored: {msg[:120]!r}")
+                    if relay:
+                        runtime.bridge.publish(
+                            f"raw/{topic.replace('$', '_').replace('#', '_').replace('+', '_')}", msg, retain=True)
+                    # Any frame shows the box is alive.
                     runtime.bridge.publish("last_seen", datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                                   retain=True)
+                                           retain=True)
 
             elif ptype == SUBSCRIBE:
                 pkt_id = struct.unpack_from(">H", payload, 0)[0]
