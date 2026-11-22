@@ -172,5 +172,5 @@ def test_ha_discovery_unchanged_by_log_level(start_bridge, mqtt_port):
     rec = Recorder(mqtt_port, "disco-ops")
     rec.client.subscribe("homeassistant/#", qos=1)
     assert wait(lambda: rec.last("homeassistant/select/aldes_vmc_AABBCCDDEEFF/mode/config"))
-    assert json.loads(rec.last("homeassistant/select/aldes_vmc_AABBCCDDEEFF/mode/config"))["name"] == "Mode"
+    assert json.loads(rec.last("homeassistant/select/aldes_vmc_AABBCCDDEEFF/mode/config"))["name"] == "Débit de ventilation"
     rec.close()

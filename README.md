@@ -27,7 +27,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
 1. **Pi-hole** (or any local DNS) rewrites `aldesiotsuite.azure-devices.net` → your Docker host
 2. The **fake broker** accepts the box's TLS connection with a self-signed cert (the HF-LPB100 firmware doesn't pin certs, only checks if the cipher suite matches — we serve legacy ciphers via `SECLEVEL=0`)
 3. The MQTT-CONNECT, SUBSCRIBE and PUBLISH frames are decoded, and PUBLISH telemetry is **republished to your Mosquitto** under `aldes/vmc/raw/...` with `retain=true`. Each frame is merged with the previous ones, so the short boot heartbeat the box sends after connecting does not turn the sensors to *unknown*
-4. **Home Assistant MQTT discovery** is auto-published — sensors and a Mode select appear automatically under an "Aldes VMC" device (named after `DEVICE_NAME`)
+4. **Home Assistant MQTT discovery** is auto-published — sensors and a *Débit de ventilation* select appear automatically under an "Aldes VMC" device (named after `DEVICE_NAME`)
 5. **Commands** are injected back into the box by publishing on `aldes/vmc/cmd/macro/<name>` — the broker translates the macro to the real Aldes JSON-RPC payload and forwards it on the box's `devicebound` topic
 
 ## Quick start
@@ -72,7 +72,7 @@ Connect Box ──(MQTT/TLS)──> [Pi-hole DNS rewrite] ──> [this fake bro
    docker compose up -d --build
    docker compose logs -f
    ```
-   The first lines show the version you run: `HA discovery: 25 sensors + 2 binary sensors + 1 select + 9 buttons`.
+   The first lines show the version you run: `HA discovery: 25 sensors + 3 binary sensors + 1 select + 9 buttons`.
 
 5. **Wait for the box to reconnect** (a few minutes, or power-cycle it). You should see in the logs:
    ```
@@ -115,7 +115,7 @@ Sensors turn *unavailable* when the box is disconnected, or after 30 min without
 
 | Entity | Type | Effect |
 |---|---|---|
-| Mode | select | Quotidien, Invités, Boost, Vacances (1 day), Programme; shows the mode reported by the box (`current_mode`) |
+| Débit de ventilation | select | Quotidien, Invités, Boost, Vacances (1 day), Programme; shows the profile reported by the box (`current_mode`). Entity ID `select.aldes_vmc_mode` |
 | Quotidien, Invités, Boost, Programme | buttons | switch mode |
 | Vacances 1 jour / 7 jours | buttons | holidays from now for 1 / 7 days (needs the box's clock, see [Box clock (NTP)](#box-clock-ntp)) |
 | Annuler vacances | button | ends holidays by restoring the mode used before them |
@@ -132,6 +132,7 @@ Any other [macro](#macros) can be sent by publishing on `aldes/vmc/cmd/macro/<na
 | Début / Fin des vacances | current holiday range, published by the bridge (the box does not report it); empty outside holidays |
 | Horloge de la box | *OK* / *Problème*: whether the box's clock is set (NTP), checked at each connection |
 | Filtre (durée de vie restante) | `ff_cpt`, % of filter life left: 0 when the unit's remote asks to change the filter; should go back to 100 after a filter change and a reset of the filter timer on the unit |
+| By-pass ouvert | *Ouvert* when the heat exchanger recovers nothing while air flows (`echange_pwr` = 0), i.e. the bypass is open; unknown when inside and outside differ by less than 2 °C. This is the **state** of the bypass, decided by the unit from its comfort mode (see [Débit de ventilation and comfort mode](#débit-de-ventilation-and-comfort-mode)) |
 | Filtre à changer | *Problème* when the filter life is 0, like the remote's alert: a good trigger for a notification |
 | Firmware WiFi / Firmware MCU | `Vers_W` (build date, e.g. 2018-12-14) / `Vers_UC` (e.g. 26) |
 | Signal WiFi | `RSSI`; absent from some boxes' frames, **disabled by default** |
@@ -151,7 +152,20 @@ With the default prefix `aldes/vmc`:
 | `aldes/vmc/box_clock` | JSON `{"synced", "token_expiry", "checked_at"}`, retained |
 | `aldes/vmc/cmd/macro/<name>` | send a [macro](#macros) (publish with `retain=false`) |
 
-## Mode mapping (validated empirically on Dee Fly Cube)
+## Débit de ventilation and comfort mode
+
+The Aldes manual describes two **independent** settings:
+
+| | **Débit de ventilation** (`current_mode`) | **Mode de confort** |
+|---|---|---|
+| What it sets | the ventilation flow profile: Vacances, Quotidien, Invités, Boost, Programme | whether the unit favours heat (keeps the exchanger), favours cool (may open the bypass to bring in cooler outside air) or decides by itself (auto) |
+| Where it is set | the Connect Box (`changeMode`), so Home Assistant, or the remote | **the unit's remote only**: the Connect Box has no command for it |
+| What the box reports | `current_mode`, `set_spd` | nothing directly; its effects are visible: bypass open (`echange_pwr` = 0) and, while cooling, a higher flow than the profile's |
+| In Home Assistant | *Débit de ventilation* select, buttons | *By-pass ouvert* (state of the bypass, not the comfort mode itself) |
+
+The comfort mode does not change the ventilation profile: with "favour cool" on a warm day, `current_mode` stayed on Invités, then Quotidien when selected, while the unit cooled the house at 210 m³/h on top of the profile's flow. See [docs/PROTOCOL.md](docs/PROTOCOL.md#bypass-and-comfort-mode-what-the-telemetry-shows).
+
+## Débit de ventilation: profiles (validated empirically on Dee Fly Cube)
 
 | Aldes code | Friendly name | Speed | Flow observed |
 |---|---|---|---|

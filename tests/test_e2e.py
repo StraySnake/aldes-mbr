@@ -293,9 +293,9 @@ def discovery(mqtt_port):
     from conftest import Recorder
     rec = Recorder(mqtt_port, "disco-reader")
     rec.client.subscribe("homeassistant/#", qos=1)
-    # 25 sensors + 2 binary sensors + 1 select + 9 buttons. (The empty configs removing old
+    # 25 sensors + 3 binary sensors + 1 select + 9 buttons. (The empty configs removing old
     # entities delete the retained message: a new subscriber does not receive them.)
-    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 37)
+    assert wait(lambda: len([t for t in rec.msgs if t.startswith("homeassistant/")]) >= 38)
     rec.close()
     return {t: json.loads(rec.last(t)) for t in rec.msgs if t.startswith("homeassistant/") and rec.last(t)}
 
@@ -647,3 +647,8 @@ def test_filter_life_and_filter_change(bridge, box, mqtt_port):
     cfg = cfgs["homeassistant/binary_sensor/aldes_vmc_AABBCCDDEEFF/filter_change/config"]
     assert cfg["device_class"] == "problem" and "ff_cpt" in cfg["value_template"]
     assert cfgs["homeassistant/sensor/aldes_vmc_AABBCCDDEEFF/filter_life/config"]["unit_of_measurement"] == "%"
+
+
+def test_bypass_binary_sensor_discovered(bridge, mqtt_port):
+    cfg = discovery(mqtt_port)["homeassistant/binary_sensor/aldes_vmc_AABBCCDDEEFF/bypass/config"]
+    assert cfg["device_class"] == "opening" and "echange_pwr" in cfg["value_template"]
