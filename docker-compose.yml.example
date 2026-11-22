@@ -11,14 +11,14 @@
 #   arp -a                  (look for prefix 28:9C:6E)
 
 services:
-  aldes-mqtt-bridge:
+  aldes-mbr:
     # Build the image from this repository (recommended: it always matches the code
     # you cloned). Update with: git pull && docker compose up -d --build
     build: .
     # Or use the image published by this repository's CI instead of building
     # (GitHub may keep it private until the owner makes the package public):
     # image: ghcr.io/straysnake/aldes-mbr:latest
-    container_name: aldes-mqtt-bridge
+    container_name: aldes-mbr
     restart: unless-stopped
     init: true           # forwards SIGTERM properly -> fast, clean `docker compose stop`
     logging:             # cap Docker's own log (the broker logs every telemetry frame)
