@@ -273,7 +273,9 @@ The bridge checks the clock at every connection of the box, from the expiry date
 - the log says `box clock: set (token expiry …)` or `box clock NOT SET (…)`;
 - the *Horloge de la box* entity shows *OK* or *Problème*.
 
-After fixing NTP, power-cycle the box (or wait for its next reconnection) so that the check runs again. The box goes back to 2016 after every power cut and sets its clock again as soon as NTP answers, so keep the rule in place. A useful automation: notify when *Horloge de la box* turns to *Problème*.
+The box's clock is only visible when it connects, and right after a boot (a power cut, for example) it often connects before NTP has answered. So while the clock is not set, the bridge closes the connection after 10 minutes: the box reconnects within seconds with a fresh token, and the clock is checked again. If it is still not set, the next check comes after 20, then 40 minutes, then every hour. Home Assistant does not see these short disconnections (the box is reported offline only if it does not come back within 15 minutes). `CLOCK_RECHECK=0` disables this.
+
+The box goes back to 2016 after every power cut and sets its clock again as soon as NTP answers, so keep the NAT rule in place. A useful automation: notify when *Horloge de la box* stays on *Problème* for more than an hour.
 
 ## Security
 
@@ -306,6 +308,8 @@ Environment variables of the container (see [`docker-compose.yml.example`](docke
 | `LOG_LEVEL` | `info` | `info`: connections, commands, first frame of each connection; `debug`: every frame with its payload; `warning`: problems only |
 | `LOG_FILE` | `/logs/mitm.log` | log file, rotated at `LOG_MAX_BYTES` (5 MB, 0 = never), `LOG_BACKUPS` (3) files kept |
 | `TLS_CIPHERS` | `ALL:@SECLEVEL=0` | cipher suites offered to the box; the negotiated one is logged at each connection |
+| `CLOCK_RECHECK` | `600` | while the box's clock is not set, seconds before the bridge closes the connection to check it again (doubled at each failed check, up to 1 h; 0 = never) |
+| `CLOCK_RECHECK_GRACE` | `900` | seconds the box may take to reconnect after such a check before Home Assistant shows it offline |
 | `CERT_DIR` | `/data` | where the self-signed certificate is stored |
 
 Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an explicit message.
@@ -323,7 +327,7 @@ Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an expl
 | No `NEW CONNECTION` in the logs | the box does not use your DNS rewrite, or cannot reach port 8883 of the host: check the DNS answer for `aldesiotsuite.azure-devices.net` and the firewall; power-cycle the box |
 | `REFUSED: not in DEVICE_IP` | the box's IP changed: reserve it in your DHCP server and update `DEVICE_IP` |
 | `WARNING: client_id != DEVICE_ID` | wrong `DEVICE_MAC` |
-| `box clock NOT SET` | NTP blocked: see [Box clock (NTP)](#box-clock-ntp) |
+| `box clock NOT SET` | normal for a few minutes after the box boots (it is checked again automatically); if it persists, NTP is blocked: see [Box clock (NTP)](#box-clock-ntp) |
 | `Address already in use` at startup | another container (the old aldes-mqtt-bridge?) already listens on port 8883 |
 | *Dernière commande*: *Échec* | the box acknowledged but did not change mode; for holidays, check the clock |
 | Entities *unavailable* | box disconnected, or no frame for 30 min: check `docker compose logs` |

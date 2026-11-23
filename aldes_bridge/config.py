@@ -45,6 +45,12 @@ Env vars:
                          /tmp/aldes-bridge.health)
   LOG_MAX_BYTES          rotate LOG_FILE above this size (default: 5 MB, 0 = no rotation)
   LOG_BACKUPS            number of rotated log files kept (default: 3)
+  CLOCK_RECHECK          seconds after which a box connected with an unset clock is
+                         disconnected, so that it reconnects with a fresh token and its
+                         clock is checked again (default: 600, doubled at each failed
+                         check up to 1 h; 0 = never)
+  CLOCK_RECHECK_GRACE    seconds the box may take to come back after such a disconnection
+                         before HA marks it offline (default: 900)
 """
 import ipaddress, os, re, sys
 from pathlib import Path
@@ -107,6 +113,14 @@ CMD_CONFIRM_GRACE = _env_num("CMD_CONFIRM_GRACE", 3.0, cast=float, minimum=0)
 # it receives, even QoS 0 ones, and acknowledges it: with QoS 0 it eats the first 2
 # bytes of the payload. QoS 1 gives it a real packet id, and its PUBACK confirms receipt.
 CMD_QOS = _env_num("CMD_QOS", 1, minimum=0)
+# The box's clock is only known at connection time (from its SAS token). Right after a
+# boot it connects before NTP has answered: without a new connection, the bridge would
+# keep reporting an unset clock (and refusing holidays) until the box reconnects on its
+# own, which can take days. So while the clock is unset, the bridge closes the
+# connection now and then; the box reconnects within seconds with a fresh token.
+CLOCK_RECHECK = _env_num("CLOCK_RECHECK", 600.0, cast=float, minimum=0)
+CLOCK_RECHECK_MAX = 3600.0
+CLOCK_RECHECK_GRACE = _env_num("CLOCK_RECHECK_GRACE", 900.0, cast=float, minimum=0)
 if CMD_QOS > 1:
     sys.exit(f"FATAL: CMD_QOS must be 0 or 1, got {CMD_QOS}")
 

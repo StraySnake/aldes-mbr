@@ -629,6 +629,47 @@ def test_box_clock_updated_on_reconnect(start_bridge, mqtt_client):
     box2.close()
 
 
+def test_unset_clock_rechecked_by_forced_reconnection(start_bridge, mqtt_client):
+    """Right after a boot the box connects before NTP answers: the bridge closes the
+    connection after CLOCK_RECHECK so that the box reconnects with a fresh token,
+    without HA seeing it offline meanwhile."""
+    bridge = start_bridge({"CLOCK_RECHECK": "1", "CLOCK_RECHECK_GRACE": "5"})
+    box = FakeBox(bridge.port, se=UNSET_CLOCK_SE)
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is False)
+    assert wait(lambda: mqtt_client.last(STATUS) == "online")
+    assert box.closed.wait(5), "the bridge should close the connection to recheck the clock"
+    assert "box clock still not set: closing the connection" in bridge.log()
+    time.sleep(0.5)
+    assert mqtt_client.last(STATUS) == "online"  # within the grace period
+    box2 = FakeBox(bridge.port)  # reconnects, NTP has answered meanwhile
+    assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
+    time.sleep(1.5)
+    assert not box2.closed.is_set()  # clock set: no more forced reconnections
+    mqtt_client.publish("aldes/vmc/cmd/macro/vacances1j", "1")
+    assert wait(lambda: box2.received('"W2'))
+    time.sleep(5)  # the grace timer fires: the box is back, still online
+    assert mqtt_client.last(STATUS) == "online"
+    box2.close()
+
+
+def test_box_offline_if_it_does_not_come_back_after_clock_recheck(start_bridge, mqtt_client):
+    bridge = start_bridge({"CLOCK_RECHECK": "1", "CLOCK_RECHECK_GRACE": "1"})
+    box = FakeBox(bridge.port, se=UNSET_CLOCK_SE)
+    assert wait(lambda: mqtt_client.last(STATUS) == "online")
+    assert box.closed.wait(5)
+    assert wait(lambda: mqtt_client.last(STATUS) == "offline", timeout=5)
+    assert "did not reconnect" in bridge.log()
+
+
+def test_set_clock_never_forces_reconnection(start_bridge):
+    bridge = start_bridge({"CLOCK_RECHECK": "1"})
+    box = FakeBox(bridge.port)
+    time.sleep(2.5)
+    assert not box.closed.is_set()
+    assert "closing the connection" not in bridge.log()
+    box.close()
+
+
 def test_intruder_does_not_change_box_clock(bridge, box, mqtt_client):
     assert wait(lambda: box_clock(mqtt_client).get("synced") is True)
     intruder = FakeBox(bridge.port, cid="intruder", se=UNSET_CLOCK_SE)
