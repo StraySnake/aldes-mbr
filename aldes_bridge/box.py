@@ -3,8 +3,9 @@ import json, socket, ssl, struct, threading, time
 from collections import deque
 from datetime import datetime, timezone
 from .config import (
-    ALLOWED_IPS, BOX_EVENTS, BOX_TOPIC_PREFIX, CMD_QOS, DEFAULT_KEEPALIVE, DEVICE_ID,
-    HANDSHAKE_TIMEOUT, LOG_LEVEL, MAX_PACKET_SIZE, POLL_INTERVAL,
+    ALLOWED_IPS, BOX_EVENTS, BOX_TOPIC_PREFIX, CLOCK_RECHECK, CLOCK_RECHECK_GRACE,
+    CLOCK_RECHECK_MAX, CMD_QOS, DEFAULT_KEEPALIVE, DEVICE_ID, HANDSHAKE_TIMEOUT, LOG_LEVEL,
+    MAX_PACKET_SIZE, POLL_INTERVAL,
 )
 from .logs import log, redact_password
 from .mqtt_codec import (
@@ -44,6 +45,8 @@ class Session:
         self._last_pkt_id = 0
         self.inflight = {}  # packet id -> topic of QoS 1 PUBLISHes not yet acknowledged
         self.replaced = False  # set when a newer connection of the same box took over
+        self.connected_at = None  # monotonic time of CONNECT
+        self.clock_recheck = False  # closed by us to check the box's clock again
 
     def next_packet_id(self, topic):
         """Any thread: a fresh packet id (1..65535) for a QoS 1 PUBLISH, recorded in flight."""
@@ -120,19 +123,54 @@ def send_publish_to_box(client_id, topic, payload):
         return None
 
 
+# Delay before the next forced reconnection while the box's clock is unset: CLOCK_RECHECK,
+# doubled after each check that still finds it unset (up to CLOCK_RECHECK_MAX), reset
+# once it is set. Only touched by the box's connection thread.
+_recheck_delay = CLOCK_RECHECK
+
+
+def _clock_recheck_due(sess):
+    """Owner thread: should this idle box connection be closed to check the clock again?"""
+    return (CLOCK_RECHECK > 0 and runtime.box_clock_set is False
+            and sess.client_id == DEVICE_ID and sess.connected_at is not None
+            and not sess.inflight and not sess._outbox  # never in the middle of a command
+            and time.monotonic() - sess.connected_at >= _recheck_delay)
+
+
+def _start_clock_recheck(sess):
+    """Owner thread: mark the session as closed for a clock check; back off the next one."""
+    global _recheck_delay
+    log(f"{sess.addr} box clock still not set: closing the connection so that the box "
+        f"reconnects with a fresh token (it usually does within seconds)")
+    _recheck_delay = min(_recheck_delay * 2, CLOCK_RECHECK_MAX)
+    sess.clock_recheck = True
+
+
+def _publish_status_after_grace():
+    """After a forced reconnection: report the box offline only if it did not come back."""
+    if runtime.bridge and not box_online():
+        log(f"the box did not reconnect within {CLOCK_RECHECK_GRACE:.0f} s after the clock check")
+        runtime.bridge.publish_status()
+
+
 def _check_box_clock(addr, pwd):
     """Infer from the SAS token expiry whether the box's clock is set; publish it."""
+    global _recheck_delay
     se = parse_se(pwd.decode("utf-8", errors="replace"))
     if se is None:
         return
     clock_set = is_clock_set(se)
     runtime.box_clock_set = clock_set
+    if clock_set:
+        _recheck_delay = CLOCK_RECHECK
     expiry = datetime.fromtimestamp(se, timezone.utc)
     if clock_set:
         log(f"{addr}   box clock: set (token expiry {expiry.isoformat(timespec='seconds')})")
     else:
         log(f"{addr}   box clock NOT SET (token expiry {expiry.date()}): {NTP_HINT}. "
-            f"Holidays will not start until it is.", "warning")
+            f"Holidays will not start until it is."
+            + (f" Checking again in {_recheck_delay / 60:.0f} min." if CLOCK_RECHECK else ""),
+            "warning")
     if runtime.bridge:
         runtime.bridge.publish("box_clock", json.dumps({
             "synced": clock_set,
@@ -179,6 +217,9 @@ def handle_client(raw_sock, addr):
             except socket.timeout:
                 if time.monotonic() - last_rx > idle_timeout:
                     raise
+                if _clock_recheck_due(sess):
+                    _start_clock_recheck(sess)
+                    break
                 continue
             if not head:
                 break
@@ -233,6 +274,7 @@ def handle_client(raw_sock, addr):
                 idle_timeout = (keepalive or DEFAULT_KEEPALIVE) * 1.5
                 tls_sock.settimeout(idle_timeout)
                 sess.client_id = cid
+                sess.connected_at = time.monotonic()
                 with _sessions_lock:
                     old = sessions.get(cid)
                     sessions[cid] = sess
@@ -357,7 +399,13 @@ def handle_client(raw_sock, addr):
             except Exception:
                 pass
         if sess and _unregister(sess) and runtime.bridge:
-            runtime.bridge.publish_status()
+            if sess.clock_recheck:
+                # The box comes back within seconds: keep HA's entities available.
+                t = threading.Timer(CLOCK_RECHECK_GRACE, _publish_status_after_grace)
+                t.daemon = True
+                t.start()
+            else:
+                runtime.bridge.publish_status()
         log(f"{addr} closed (client_id={sess.client_id if sess else None})")
 
 
