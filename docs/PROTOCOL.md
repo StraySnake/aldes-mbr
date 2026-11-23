@@ -111,7 +111,7 @@ Sent every ~10 min (and ~5 s after each command):
 | `tte_csn` | 2790 for at least 14 h, then 2791 (11:34 the next day) | a slow counter, maybe days of operation (≈ 7.6 years). To confirm with the next increments. |
 | `ff_cpt` | 0, while the unit's remote showed "filter 0 %, change it"; 50 in the Aldes app's demo data | **remaining filter life in %**. Exposed as *Filtre (durée de vie restante)* and *Filtre à changer*. |
 | `dep_ind` | always 0 | unknown; maybe defrost: watch it on frosty nights. |
-| `dtb_ind` | 0 for a day; 55–255, changing at every frame, once the comfort mode was set to "favour cool"; 255 just after switching to "favour heat" (bypass closed) | moves with the comfort mode, but is **not** the bypass state; maybe related to the comfort mode itself. Unknown. |
+| `dtb_ind` | 0 for at least a day; 55–255, changing at every frame, once the comfort mode was set to "favour cool" (bypass open); then 255 in "favour heat" and in "auto" (bypass closed) | does **not** encode the comfort mode (same value in heat and auto) nor the bypass state. Maybe a timer started by a change on the remote (the manual mentions a 3 h manual bypass override): watch whether it goes back to 0. |
 - **Its clock is wrong.** The `se` (expiry) of the SAS token it generates at each connection is in November 2016, follows real time from there, and goes back to the same 2016 date after a reboot: the box counts time since boot from a fixed date until it reaches its NTP server. **That server is a hard-coded IP address, `61.164.36.105` (UDP 123)**, queried about every 24 s while unsynchronised: no DNS lookup, so a local NTP server announced by DHCP is not used. If outbound traffic from the box is blocked, its clock stays in 2016. Consequence: a holiday range dated now (2026) is in the box's future, so `changeMode W…` is acknowledged but not applied (and a weekly schedule runs at wrong times). Fix: let it reach that address, or better, redirect UDP 123 from the box to a local NTP server with a destination NAT rule on the router.
 - **It reads a packet id in every PUBLISH it receives, even QoS 0 ones, and sends a PUBACK for it.** With a QoS 0 command, the first 2 bytes of the payload (`{"`) are taken as the packet id (PUBACK id `0x7b22`) and the command it parses starts with `method":…`. Mode changes seemed to work anyway (its parser is lenient), but commands are now sent with QoS 1, which gives it a real packet id and makes the PUBACK a receipt.
 
@@ -132,16 +132,16 @@ payload = JSON-RPC 2.0 envelope
 
 Single-param string. Valid values:
 
-| code | name (FR/EN) | speed on Dee Fly Cube |
-|---|---|---|
-| `V` | Quotidien / Daily | V2 (~165 m³/h) |
-| `W` | Vacances / Holiday | V1 (~50 m³/h) — see below |
-| `X` | Boost (max) | V4 (~330 m³/h) |
-| `Y` | Invités / Guests / Kitchen | V3 (~250 m³/h) |
-| `Z` | Programme / Schedule | follows weekly plan |
+| code | name (FR/EN) | `set_spd` | flow on one Dee Fly Cube (configured per installation) |
+|---|---|---|---|
+| `V` | Quotidien / Daily | 1 | 105 m³/h (~165 m³/h on the original project's unit) |
+| `W` | Vacances / Holiday | 0 | 105 m³/h (~50 m³/h on the original project's unit) — see below |
+| `X` | Boost (max) | 3 | 210 m³/h (~330 m³/h) |
+| `Y` | Invités / Guests | 2 | 195 m³/h for ~40 min, then 105 m³/h (~250 m³/h) |
+| `Z` | Programme / Schedule | varies | follows weekly plan |
 
 Notes:
-- **X and Y are inverted vs InspirAir docs**. On Dee Fly Cube, X is the "max boost" code that returns the highest fan speed.
+- Names differ between Aldes documents: the InspirAir Home Modbus document numbers the speeds 0 Vacances, 1 Normal, 2 « Pointe cuisine », 3 « Invités ». On a Dee Fly Cube, `X` is the highest speed (`set_spd` 3) and `Y` the intermediate one (2).
 - Holiday mode (`W`) alone is **ignored** — it requires concatenated start/end dates.
 
 ### `changeMode W…` — holiday mode with date range
@@ -224,6 +224,16 @@ Two settings are independent: the **ventilation flow profile** (`current_mode`: 
 | flows | 105 m³/h | **210 m³/h**, fans at 96–100 %, even after switching to Quotidien (V) | 105 m³/h |
 
 The change shows in the frame sent right after the remote is set (here 14:09:43 for "favour heat"). With "favour cool" and a warm house, the unit opened the bypass and cooled at 210 m³/h, above the flow of the profile: `current_mode` was not changed (it stayed `Y`, then became `V` when Quotidien was selected, while the flow stayed at 210 m³/h). "Favour heat" closed the bypass at once and the flow went back to the profile's. The bridge's *By-pass ouvert* binary sensor uses `echange_pwr = 0` while air flows (unknown when inside and outside differ by less than 2 °C).
+
+### Auto
+
+In "auto", the unit chooses by itself from the indoor and outdoor temperatures. In November (23 °C inside, 11 °C outside), switching from "favour heat" to "auto" changed nothing: bypass closed, ~410 W recovered, flow of the profile.
+
+### Changing the comfort mode: research
+
+- **Connect Box**: no command. The Aldes Connect app 4.21 only sends `changeMode`, `changeCMO`, `changePlanningMode`, `changeTemperatureReference` and `prixkwh`; its InspirAir settings screen has no comfort or bypass setting.
+- **Modbus**: the Aldes document *ModBus EasyVEC® & InspirAir® Home* (11024829-B, 02/2017) lists, for the InspirAir Home (RS485, 115200 bauds, even parity, 1 stop bit, slave 2), register **259 ($103) *Gestion Bypass Echangeur*: 0 OFF, 1 Auto, 2 winter optimisation, 3 summer optimisation, 4 open**, and register 348 ($15C) *Etat Bypass* (0 closed, 1 open, 2 closing, 3 opening…). The Dee Fly Cube board has no Modbus terminal: its 2-wire green terminal is the **iBus**, which powers the Connect Box and carries its data; its 10-pin connector takes the radio receiver of the remote.
+- **Remote**: the Dee Fly Cube remote (« ALS CDE SANS FIL DEE FLY », ref. 11023850) is wireless, with a **TI CC110L** sub-GHz transceiver (26 MHz crystal) driven over SPI by an Aldes-programmed microcontroller (« PRG-1348/A 1.31 »). The link is two-way: the remote shows the unit's filter alert and sends its own indoor temperature. Next step: capture the SPI bus of the CC110L (radio configuration at power-up, packets sent when the comfort mode is changed), then reproduce the packets with an ESP32 and a CC1101 module.
 
 ## Other observations
 
