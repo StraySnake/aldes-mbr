@@ -244,5 +244,17 @@ def test_https_info_log_is_one_line_per_request(start_bridge):
     assert "Authorization" not in log and "SECRET123" not in log  # headers: debug only
 
 
+def test_https_firmware_check_gets_404(start_bridge):
+    """The box's firmware-version check: the bridge 404s it to keep the box on its firmware."""
+    port = free_port()
+    bridge = start_bridge({"HTTPS_PORT": str(port)})
+    assert wait(lambda: "HTTPS listening" in bridge.log())
+    resp = _probe_request(port, b"GET /firmware/VersionAldesConnectBoxIOTHUB.txt HTTP/1.1\r\n"
+                                b"Host: aldes.blob.core.windows.net\r\n\r\n", server_name=None)
+    assert resp.startswith(b"HTTP/1.1 404")
+    assert b"\r\nDate: " in resp  # the Date header still sets the box's clock
+    assert wait(lambda: "firmware version check" in bridge.log())
+
+
 def test_https_off_by_default(bridge):
     assert "HTTPS listening" not in bridge.log()

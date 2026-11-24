@@ -52,11 +52,11 @@ SENSORS = [
     ("rssi",                "Signal WiFi",           "RSSI",        {"icon": "mdi:wifi", "entity_category": "diagnostic", "enabled_by_default": False}),
     # Vers_W is the WiFi firmware build date as a Unix timestamp (e.g. 1544745600.0 =
     # 2018-12-14) on recent boxes, a plain version string ("21") on others.
-    ("fw_wifi",             "Firmware WiFi",         "Vers_W",      {"icon": "mdi:chip", "entity_category": "diagnostic", "value_template": (
+    ("fw_wifi",             "Firmware (date)",       "Vers_W",      {"icon": "mdi:chip", "entity_category": "diagnostic", "value_template": (
         "{% set v = value_json.Vers_W | default(none) %}"
         "{% if v is number and v > 1000000000 %}{{ v | int | timestamp_custom('%Y-%m-%d', false) }}"
         "{% else %}{{ v }}{% endif %}")}),
-    ("fw_uc",               "Firmware MCU",          "Vers_UC",     {"icon": "mdi:chip", "entity_category": "diagnostic"}),
+    ("fw_uc",               "Version firmware",      "Vers_UC",     {"icon": "mdi:chip", "entity_category": "diagnostic"}),
 ]
 
 # Telemetry fields whose meaning is not known yet, exposed raw (diagnostic, disabled by

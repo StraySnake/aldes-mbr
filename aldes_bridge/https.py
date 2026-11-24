@@ -11,6 +11,12 @@ for anything else), always with the current time in the HTTP Date header. The bo
 clock from that header (to UTC), then reconnects to MQTT about a minute later with a fresh
 token: a time source that needs no NTP. The request is logged, credentials redacted.
 
+If aldes.blob.core.windows.net is also pointed at this host, the box's firmware-version
+check (GET /firmware/Version…txt, its very first request at boot) lands here too. The bridge
+answers 404 instead of the real "V=53", which keeps the box on its firmware (so an Aldes OTA
+push cannot break the bridge) — and that answer carries the Date header, so the clock is set
+even earlier, before the MQTT connection.
+
 The bridge runs as an unprivileged user, so it cannot listen on 443 itself: set e.g.
 HTTPS_PORT=8443 and add a port forward on the router (box -> this host, TCP 443 -> 8443).
 """
@@ -95,6 +101,8 @@ def _log_request(addr, data):
 
 # GET /devices/<id>/messages/devicebound?api-version=...
 C2D_POLL = re.compile(rb"GET /devices/[^/\s]+/messages/devicebound(\?\S*)? HTTP/1\.[01]\r\n")
+# GET /firmware/VersionAldesConnectBox…txt — the box's firmware-update version check.
+FW_CHECK = re.compile(rb"GET /firmware/\S*[Vv]ersion\S*\.txt HTTP/1\.[01]\r\n")
 
 
 def _reply(sock, status):
@@ -127,6 +135,13 @@ def _handle(raw, addr, ctx):
             _reply(sock, "204 No Content")
             log(f"{addr} https: answered 204 No Content (no pending cloud-to-device message), "
                 f"with the current time")
+        elif FW_CHECK.match(data):
+            # The box checks its firmware version here before every boot. Answering 404
+            # (not the real "V=53") keeps it on its current firmware, so an Aldes OTA push
+            # can never change the hostname, add cert pinning, or otherwise break the bridge.
+            _reply(sock, "404 Not Found")
+            log(f"{addr} https: answered 404 to the firmware version check "
+                f"(keeps the box on its firmware), with the current time")
         elif data.startswith((b"GET ", b"POST ", b"PUT ", b"HEAD ", b"PATCH ", b"DELETE ")):
             _reply(sock, "404 Not Found")
             log(f"{addr} https: answered 404 (with the current time in the Date header)")
