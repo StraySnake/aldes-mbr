@@ -297,7 +297,39 @@ At every boot, before anything else, the box fetches `https://aldes.blob.core.wi
 
 **Keeping the box on its current firmware is recommended.** A newer firmware could verify the TLS certificate, change the hostname, or otherwise stop working with the bridge, and a Wi-Fi-module flash cannot be rolled back. By pointing `aldes.blob.core.windows.net` at the bridge (or `0.0.0.0`), the version check gets a `404`, so the box never updates. Pointing it at the bridge is better than `0.0.0.0`: that first request then also sets the box's clock (its `Date` header), before the MQTT connection.
 
-The firmware images themselves are encrypted (the bridge cannot read them, and does not serve any), so this project does not modify the box's firmware.
+### The firmware store (for the curious)
+
+Aldes hosts the firmware in a **public, listable** Azure Blob container. Nothing here is secret, but none of it is needed to run the bridge — it is documented for people reverse engineering the box. Reading these files does not touch your box.
+
+- **Base URL:** `https://aldes.blob.core.windows.net/firmware/`
+- **Version file** (what the box reads at boot): [`VersionAldesConnectBoxIOTHUB.txt`](https://aldes.blob.core.windows.net/firmware/VersionAldesConnectBoxIOTHUB.txt) — a 4-byte text file, `V=53` in Jan 2026.
+- **Current image:** `ModemWifi00M1aAppIOTHUB.binc` (identical to the latest `…_v53.binc`).
+
+**List every file, with dates and sizes:**
+
+```bash
+curl -s "https://aldes.blob.core.windows.net/firmware?restype=container&comp=list"
+```
+
+That returns XML listing the version file, the current image, every past app image (`ModemWifi00M1aAppIOTHUB_v25.binc` … `_v53.binc`, and an `old/` folder going back further), and `LPB100_v2x.bin` — the Wi-Fi module's own base firmware, separate from the Aldes app.
+
+**Download one file** (for offline analysis; nothing is flashed):
+
+```bash
+curl -O "https://aldes.blob.core.windows.net/firmware/ModemWifi00M1aAppIOTHUB_v53.binc"
+```
+
+**File format** (`.binc`, Aldes-specific):
+
+| Bytes | Meaning |
+|---|---|
+| 0 | version, as hex digits (`0x53` = "53", `0x26` = "26") |
+| 4–7 | payload length, little-endian |
+| 8… | **encrypted** body (≈ 7.998 bits/byte of entropy; 16-byte blocks, no chaining) |
+
+The body is encrypted with a key that is **not in the files** and that changed between v26 and v47. No public key or tool to decrypt it was found; Hi-Flying's own module firmware (`LPB100_*.bin`) is plain, so the `.binc` container is Aldes' own. The bridge reads and serves none of it, so this project does not modify the box's firmware.
+
+Your box's version is the **`Vers_UC`** value in the telemetry (`Version firmware` sensor): `26` means the firmware dated 2018-12-14 (`Vers_W`).
 
 ## Security
 
