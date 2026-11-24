@@ -1,25 +1,22 @@
-"""Diagnostic listener for the box's HTTPS connections (port 443).
+"""Answers the box's HTTPS requests (port 443), and so gives it the time.
 
-At boot, and again after its MQTT connection, the box tries a TCP connection to port 443
-of aldesiotsuite.azure-devices.net (the same name as MQTT, so with the DNS rewrite: this
-host). Nothing answers there, and what it wants is not known. When HTTPS_PROBE_PORT is
-set, the bridge listens on that port and logs what the box sends: the server name of its
-TLS ClientHello (SNI), then the HTTP request (credentials redacted), answers, closes,
-and never sends anything else.
+Besides MQTT (8883), the box sends HTTPS requests to port 443 of
+aldesiotsuite.azure-devices.net (with the DNS rewrite: this host): at boot, before and right
+after its MQTT connection. Observed on a Dee Fly Cube, without SNI:
+GET /devices/<id>/messages/devicebound?api-version=2016-02-03, Azure IoT Hub's HTTPS poll for
+cloud-to-device messages queued while it was offline.
 
-What the box asks for (Dee Fly Cube, observed): at boot, before and right after its MQTT
-connection, GET /devices/<id>/messages/devicebound?api-version=2016-02-03, Azure IoT Hub's
-HTTPS poll for queued cloud-to-device messages, without SNI. The probe answers it like the
-real hub does with an empty queue: "204 No Content". Anything else gets "404 Not Found".
-Both carry the current time in the Date header (it does not set the box's clock).
+The bridge answers like the real hub with an empty queue, "204 No Content" ("404 Not Found"
+for anything else), always with the current time in the HTTP Date header. The box sets its
+clock from that header (to UTC), then reconnects to MQTT about a minute later with a fresh
+token: a time source that needs no NTP. The request is logged, credentials redacted.
 
-The bridge runs as an unprivileged user, so it cannot listen on 443 itself: use
-e.g. HTTPS_PROBE_PORT=8443 and a port forward on the router (box -> this host, TCP 443
--> 8443).
+The bridge runs as an unprivileged user, so it cannot listen on 443 itself: set e.g.
+HTTPS_PORT=8443 and add a port forward on the router (box -> this host, TCP 443 -> 8443).
 """
 import re, socket, ssl, struct, threading
 from email.utils import formatdate
-from .config import HANDSHAKE_TIMEOUT, HOST, HTTPS_PROBE_PORT
+from .config import HANDSHAKE_TIMEOUT, HOST, HTTPS_PORT
 from .logs import log
 from .tls import build_ssl_context
 
@@ -84,14 +81,16 @@ def _read_request(sock):
 def _log_request(addr, data):
     head, sep, body = data.partition(b"\r\n\r\n")
     if not sep:
-        log(f"{addr} probe: {len(data)} bytes, not an HTTP request: {_redact(repr(data[:LOG_BODY]))}")
+        log(f"{addr} https: {len(data)} bytes, not an HTTP request: {_redact(repr(data[:LOG_BODY]))}")
         return
-    for line in head.decode("utf-8", errors="replace").split("\r\n"):
-        log(f"{addr} probe:   {_redact(line)}")
+    lines = head.decode("utf-8", errors="replace").split("\r\n")
+    log(f"{addr} https: {_redact(lines[0])}")
+    for line in lines[1:]:
+        log(f"{addr} https:   {_redact(line)}", "debug")
     if body:
         text = body[:LOG_BODY].decode("utf-8", errors="replace")
-        log(f"{addr} probe:   body ({len(body)} bytes): {_redact(text)}"
-            + ("..." if len(body) > LOG_BODY else ""))
+        log(f"{addr} https:   body ({len(body)} bytes): {_redact(text)}"
+            + ("..." if len(body) > LOG_BODY else ""), "debug")
 
 
 # GET /devices/<id>/messages/devicebound?api-version=...
@@ -105,62 +104,63 @@ def _reply(sock, status):
 
 
 def _handle(raw, addr, ctx):
-    log(f"{addr} probe: NEW CONNECTION on the HTTPS probe port")
+    log(f"{addr} https: new connection", "debug")
     sock = raw
     try:
         raw.settimeout(HANDSHAKE_TIMEOUT)
         first = raw.recv(2048, socket.MSG_PEEK)
         if not first:
-            log(f"{addr} probe: closed without sending anything")
+            log(f"{addr} https: closed without sending anything")
             return
         if first[0] == 0x16:
-            log(f"{addr} probe: TLS ClientHello, server name (SNI) = {parse_sni(first)!r}")
+            log(f"{addr} https: TLS ClientHello, server name (SNI) = {parse_sni(first)!r}", "debug")
             sock = ctx.wrap_socket(raw, server_side=True)
             cipher = sock.cipher()
-            log(f"{addr} probe: TLS {sock.version()} {cipher[0] if cipher else '?'}")
+            log(f"{addr} https: TLS {sock.version()} {cipher[0] if cipher else '?'}", "debug")
         else:
-            log(f"{addr} probe: plain connection (not TLS)")
+            log(f"{addr} https: plain connection (not TLS)")
         data = _read_request(sock)
         _log_request(addr, data)
         if C2D_POLL.match(data):
             # Azure IoT Hub's HTTPS "receive cloud-to-device message": the box polls for
             # commands queued while it was offline. Empty queue = 204, as the real hub does.
             _reply(sock, "204 No Content")
-            log(f"{addr} probe: answered 204 No Content (no pending cloud-to-device message, "
-                f"as Azure IoT Hub does)")
+            log(f"{addr} https: answered 204 No Content (no pending cloud-to-device message), "
+                f"with the current time")
         elif data.startswith((b"GET ", b"POST ", b"PUT ", b"HEAD ", b"PATCH ", b"DELETE ")):
             _reply(sock, "404 Not Found")
-            log(f"{addr} probe: answered 404 (with the current time in the Date header)")
+            log(f"{addr} https: answered 404 (with the current time in the Date header)")
     except ssl.SSLError as e:
-        log(f"{addr} probe: TLS error: {e}")
+        log(f"{addr} https: TLS error: {e}")
     except (OSError, ValueError) as e:
-        log(f"{addr} probe: {type(e).__name__}: {e}")
+        log(f"{addr} https: {type(e).__name__}: {e}")
     finally:
         try:
             sock.close()
         except Exception:
             pass
-        log(f"{addr} probe: closed")
+        log(f"{addr} https: closed", "debug")
 
 
 def start():
-    """Start the probe listener in a background thread (no-op if HTTPS_PROBE_PORT is 0)."""
-    if not HTTPS_PROBE_PORT:
+    """Start the HTTPS listener in a background thread (no-op if HTTPS_PORT is 0)."""
+    if not HTTPS_PORT:
         return
     from .box import ip_allowed  # same DEVICE_IP restriction as the MQTT port
     ctx = build_ssl_context()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((HOST, HTTPS_PROBE_PORT))
+    srv.bind((HOST, HTTPS_PORT))
     srv.listen(4)
-    log(f"HTTPS probe listening on {HOST}:{HTTPS_PROBE_PORT} (diagnostic: logs what the box asks for)")
+    log(f"HTTPS listening on {HOST}:{HTTPS_PORT} (answers the box's requests to port 443, "
+        f"gives it the time)")
 
     def loop():
         while True:
             try:
                 client, addr = srv.accept()
             except OSError as e:
-                log(f"probe accept err: {e}")
+                log(f"https accept err: {e}")
                 continue
             if not ip_allowed(addr[0]):
                 client.close()

@@ -176,7 +176,7 @@ def test_ha_discovery_unchanged_by_log_level(start_bridge, mqtt_port):
     rec.close()
 
 
-# ---------- HTTPS probe (diagnostic listener for the box's port 443 connections) ----------
+# ---------- HTTPS (the box's requests to port 443; their Date header sets its clock) ----------
 
 def _probe_request(port, request, server_name="aldesiotsuite.azure-devices.net"):
     import socket
@@ -197,8 +197,8 @@ def _probe_request(port, request, server_name="aldesiotsuite.azure-devices.net")
 
 def test_https_probe_logs_request_and_answers_404(start_bridge):
     port = free_port()
-    bridge = start_bridge({"HTTPS_PROBE_PORT": str(port)})
-    assert wait(lambda: f"HTTPS probe listening on 0.0.0.0:{port}" in bridge.log())
+    bridge = start_bridge({"HTTPS_PORT": str(port), "LOG_LEVEL": "debug"})
+    assert wait(lambda: f"HTTPS listening on 0.0.0.0:{port}" in bridge.log())
     body = b'{"hello":"box"}'
     resp = _probe_request(port, (
         b"POST /devices/AABBCCDDEEFF_AIR/messages/events?api-version=2016-11-14 HTTP/1.1\r\n"
@@ -207,7 +207,7 @@ def test_https_probe_logs_request_and_answers_404(start_bridge):
         b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body))
     assert resp.startswith(b"HTTP/1.1 404")
     assert b"\r\nDate: " in resp
-    assert wait(lambda: "probe: closed" in bridge.log())
+    assert wait(lambda: "https: closed" in bridge.log())
     log = bridge.log()
     assert "server name (SNI) = 'aldesiotsuite.azure-devices.net'" in log
     assert "POST /devices/AABBCCDDEEFF_AIR/messages/events?api-version=2016-11-14 HTTP/1.1" in log
@@ -218,20 +218,31 @@ def test_https_probe_logs_request_and_answers_404(start_bridge):
 def test_https_probe_answers_c2d_poll_with_204(start_bridge):
     """What a real box sends at boot: Azure IoT Hub's HTTPS poll for cloud-to-device messages."""
     port = free_port()
-    bridge = start_bridge({"HTTPS_PROBE_PORT": str(port)})
-    assert wait(lambda: "HTTPS probe listening" in bridge.log())
+    bridge = start_bridge({"HTTPS_PROBE_PORT": str(port), "LOG_LEVEL": "debug"})  # old name still works
+    assert wait(lambda: "HTTPS listening" in bridge.log())
     resp = _probe_request(port, (
         b"GET /devices/AABBCCDDEEFF_AIR/messages/devicebound?api-version=2016-02-03 HTTP/1.1\r\n"
         b"Host: aldesiotsuite.azure-devices.net\r\n"
         b"Authorization: SharedAccessSignature sr=x&sig=SECRET123&se=1478918800\r\n"
         b"Connection: keep-alive\r\n\r\n"), server_name=None)
     assert resp.startswith(b"HTTP/1.1 204 No Content")
-    assert wait(lambda: "probe: closed" in bridge.log())
+    assert wait(lambda: "https: closed" in bridge.log())
     log = bridge.log()
     assert "server name (SNI) = None" in log
     assert "answered 204 No Content" in log
     assert "SECRET123" not in log
 
 
-def test_https_probe_off_by_default(bridge):
-    assert "HTTPS probe" not in bridge.log()
+def test_https_info_log_is_one_line_per_request(start_bridge):
+    port = free_port()
+    bridge = start_bridge({"HTTPS_PORT": str(port)})
+    _probe_request(port, b"GET /devices/AABBCCDDEEFF_AIR/messages/devicebound?api-version=2016-02-03 HTTP/1.1\r\n"
+                         b"Authorization: SharedAccessSignature sr=x&sig=SECRET123&se=1\r\n\r\n")
+    assert wait(lambda: "answered 204" in bridge.log())
+    log = bridge.log()
+    assert "https: GET /devices/AABBCCDDEEFF_AIR/messages/devicebound" in log
+    assert "Authorization" not in log and "SECRET123" not in log  # headers: debug only
+
+
+def test_https_off_by_default(bridge):
+    assert "HTTPS listening" not in bridge.log()

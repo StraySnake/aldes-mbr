@@ -40,7 +40,7 @@ Connect Box ──(MQTT/TLS, port 8883)──> [local DNS rewrite] ──> [alde
 - A Mosquitto broker, and Home Assistant with the MQTT integration connected to it.
 - A Connect Box already paired with your Wi-Fi (use [`tools/aldes_pair.py`](tools/aldes_pair.py) if the app cannot pair it).
 - The box's **MAC address** (12 hex digits; from your DHCP leases or `arp -a`). Its client id is that MAC followed by `_AIR`.
-- **The time, for the box**: it must reach its NTP server, or a local one through a redirection. Without it, holidays and the weekly schedule do not work: see [Box clock (NTP)](#box-clock-ntp).
+- **The time, for the box**: forward its HTTPS port (443) to the bridge, or let it reach its NTP server. Without it, holidays and the weekly schedule do not work: see [Box clock](#box-clock).
 
 ### Setup
 
@@ -89,7 +89,7 @@ Connect Box ──(MQTT/TLS, port 8883)──> [local DNS rewrite] ──> [alde
    ('<box-IP>', xxxxx)   box clock: set (token expiry ...)
    ('<box-IP>', xxxxx) SUBSCRIBE pkt_id=...
    ```
-   followed by the first telemetry frame. If the `client_id` is not `<DEVICE_MAC>_AIR`, the log says so: check `DEVICE_MAC`. If it says `box clock NOT SET`, see [Box clock (NTP)](#box-clock-ntp).
+   followed by the first telemetry frame. If the `client_id` is not `<DEVICE_MAC>_AIR`, the log says so: check `DEVICE_MAC`. If it says `box clock NOT SET`, see [Box clock](#box-clock).
 
 6. **Open Home Assistant**: an "Aldes VMC" device appears (entities `sensor.aldes_vmc_*`, `select.aldes_vmc_mode`… with the default `DEVICE_NAME`). See [Data in Home Assistant](#data-in-home-assistant).
 
@@ -245,26 +245,40 @@ Commands are sent with MQTT QoS 1, so the box acknowledges each one. For profile
 
 `CMD_QOS=0` restores the old behaviour, without acknowledgement. Avoid it: the firmware reads a packet id in every message, so with QoS 0 it drops the first 2 bytes of each command.
 
-## Box clock (NTP)
+## Box clock
 
-The Connect Box does not keep the time across reboots: **at every boot its clock restarts at a fixed date in November 2016**. It sets the time only by NTP, from a **hard-coded address: `61.164.36.105`, UDP port 123** (no DNS lookup, so a local NTP server announced by DHCP is ignored). It retries about every 24 s until it gets an answer.
-
-If the box cannot reach that address (its Internet access is blocked, for example), its clock stays in 2016:
+The Connect Box does not keep the time across reboots: **at every boot its clock restarts at 2016-11-12 00:00 UTC**. Until it gets the time:
 
 - **holidays never start**: a range dated today is years in the box's future. The bridge refuses to send them (*Refusée : horloge de la box non réglée*);
 - **the weekly schedule (Programme) runs at wrong days and hours**.
 
-### Fix
+It has two time sources:
 
-On your router or firewall, choose one:
+| | **HTTPS (recommended)** | **NTP** |
+|---|---|---|
+| How | the box sends HTTPS requests to port 443 of `aldesiotsuite.azure-devices.net`, i.e. of the bridge's host; it sets its clock from the `Date` header of the answers | queries a **hard-coded address, `61.164.36.105`, UDP 123** (no DNS lookup: a local NTP server announced by DHCP is ignored) |
+| Clock obtained | **UTC** | **UTC+8** (China time): holidays end 8 h early |
+| Needs | `HTTPS_PORT` and a port forward on the router | a NAT rule to a local NTP server, or Internet access to that address |
+| Observed | sets the clock within a minute or two of every boot | after a power cut, the box stopped sending NTP requests altogether (30 h without time) |
 
-1. **Redirect it to a local NTP server (recommended: the box stays off the Internet).** Add a destination NAT (port forward) rule: from the box's IP, UDP, destination `61.164.36.105` port 123 → your router's (or NTP server's) address, port 123.
+### Fix: HTTPS (recommended)
 
-   On **OPNsense**: *Services → Network Time → General*, listen on the box's interface; then *Firewall → NAT → Port Forward*: interface = the box's network, protocol UDP, source = box IP, destination = `61.164.36.105`, port 123, redirect target = OPNsense's address on that network, port 123, filter rule association = *Add associated filter rule*.
+1. Set `HTTPS_PORT: "8443"` in `docker-compose.yml` and restart the bridge (the log says `HTTPS listening on 0.0.0.0:8443`). The bridge runs as an unprivileged user, so it cannot listen on 443 itself.
+2. On the router, add a port forward: from the box's IP, TCP, destination the Docker host, port 443 → the Docker host, port **8443**.
 
-2. **Allow only that traffic out**: a *pass* rule for UDP 123 from the box to `61.164.36.105`, before any rule that blocks its Internet access. Simpler, but it depends on a server abroad that may stop answering.
+   On **OPNsense**: *Firewall → NAT → Port Forward*: interface = the box's network, protocol **TCP**, source = box IP, destination = the Docker host's IP, port 443 (HTTPS), redirect target = the Docker host's IP, port 8443, filter rule association = *Add associated filter rule*.
+3. Power-cycle the box. Within a minute or two the log shows `https: GET /devices/…/messages/devicebound…` then `answered 204 No Content`, and the box reconnects to MQTT on its own with `box clock: set`.
 
-Your firewall log shows whether the box is blocked: look for UDP packets from the box's IP to `61.164.36.105:123`.
+The bridge answers the box's request like the real Azure IoT Hub with no command waiting (`204 No Content`), with the current time in the `Date` header, and nothing else.
+
+### Alternative: NTP
+
+On your router, choose one:
+
+1. **Redirect it to a local NTP server.** Add a destination NAT (port forward) rule: from the box's IP, UDP, destination `61.164.36.105` port 123 → your router's (or NTP server's) address, port 123. On **OPNsense**: *Services → Network Time → General*, listen on the box's interface; then *Firewall → NAT → Port Forward*: interface = the box's network, protocol UDP, source = box IP, destination = `61.164.36.105`, port 123, redirect target = OPNsense's address on that network, port 123, filter rule association = *Add associated filter rule*.
+2. **Allow only that traffic out**: a *pass* rule for UDP 123 from the box to `61.164.36.105`, before any rule that blocks its Internet access. It depends on a server abroad that may stop answering.
+
+The box then runs at UTC+8. Your firewall log shows whether its NTP requests are blocked: UDP packets from the box's IP to `61.164.36.105:123`.
 
 ### Check
 
@@ -273,9 +287,9 @@ The bridge checks the clock at every connection of the box, from the expiry date
 - the log says `box clock: set (token expiry …)` or `box clock NOT SET (…)`;
 - the *Horloge de la box* entity shows *OK* or *Problème*.
 
-The box's clock is only visible when it connects, and right after a boot (a power cut, for example) it often connects before NTP has answered. So while the clock is not set, the bridge closes the connection after 10 minutes: the box reconnects within seconds with a fresh token, and the clock is checked again. If it is still not set, the next check comes after 20, then 40 minutes, then every hour. Home Assistant does not see these short disconnections (the box is reported offline only if it does not come back within 15 minutes). `CLOCK_RECHECK=0` disables this.
+The box's clock is only visible when it connects, and right after a boot (a power cut, for example) it connects before it has the time. With HTTPS it reconnects by itself about a minute later; otherwise: while the clock is not set, the bridge closes the connection after 10 minutes: the box reconnects within seconds with a fresh token, and the clock is checked again. If it is still not set, the next check comes after 20, then 40 minutes, then every hour. Home Assistant does not see these short disconnections (the box is reported offline only if it does not come back within 15 minutes). `CLOCK_RECHECK=0` disables this.
 
-The box goes back to 2016 after every power cut and sets its clock again as soon as NTP answers, so keep the NAT rule in place. A useful automation: notify when *Horloge de la box* stays on *Problème* for more than an hour.
+The box goes back to 2016 after every power cut and sets its clock again from its time source, so keep the port forward in place. A useful automation: notify when *Horloge de la box* stays on *Problème* for more than an hour.
 
 ## Security
 
@@ -284,7 +298,7 @@ The box cannot be authenticated: its credentials are signed with an Aldes key we
 - The first packet of a connection must be `CONNECT`, and only messages from the session whose client id is the box's, on its own topics, are relayed to Mosquitto. Other clients are logged but cannot inject values into Home Assistant.
 - **`DEVICE_IP` (optional, recommended)**: connections from any other IP are closed at once. Without it, a device on your LAN that knows the box's MAC can connect with its client id, take over the session and receive your commands instead of the box. Reserve the box's IP in your DHCP server first, otherwise the bridge refuses the box when its IP changes (`REFUSED` in the logs). A firewall rule restricting port 8883 to the box's IP gives the same protection.
 - Commands only come from your Mosquitto: protect it with a username and password, otherwise any device on your LAN can control the unit.
-- Once the bridge is set up, the box needs no Internet access except NTP, which can be redirected locally. Isolating it (its own VLAN, outbound traffic blocked) is a good idea.
+- Once the bridge is set up, the box needs no Internet access: it gets the time from the bridge (HTTPS). Isolating it (its own VLAN, outbound traffic blocked) is a good idea.
 
 ## Configuration
 
@@ -310,7 +324,7 @@ Environment variables of the container (see [`docker-compose.yml.example`](docke
 | `TLS_CIPHERS` | `ALL:@SECLEVEL=0` | cipher suites offered to the box; the negotiated one is logged at each connection |
 | `CLOCK_RECHECK` | `600` | while the box's clock is not set, seconds before the bridge closes the connection to check it again (doubled at each failed check, up to 1 h; 0 = never) |
 | `CLOCK_RECHECK_GRACE` | `900` | seconds the box may take to reconnect after such a check before Home Assistant shows it offline |
-| `HTTPS_PROBE_PORT` | `0` (off) | diagnostic: also listen on this port and log the HTTPS requests the box sends to port 443 (see [HTTPS probe](#https-probe-diagnostic)) |
+| `HTTPS_PORT` | `0` (off) | answer the box's HTTPS requests on this port (with a 443 → this port forward on the router): gives the box the time (see [Box clock](#box-clock)). Old name: `HTTPS_PROBE_PORT` |
 | `CERT_DIR` | `/data` | where the self-signed certificate is stored |
 
 Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an explicit message.
@@ -321,16 +335,6 @@ Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an expl
 - **Health check**: the container is *healthy* while the bridge runs and Mosquitto is connected (`docker ps` shows it). An offline box does not make it unhealthy: Home Assistant's availability shows that.
 - **Network**: the example uses `network_mode: host`, so that the bridge sees the box's real IP (needed for `DEVICE_IP`).
 
-### HTTPS probe (diagnostic)
-
-Besides MQTT (port 8883), the box tries HTTPS connections to port 443 of `aldesiotsuite.azure-devices.net`, i.e. of the bridge's host: at boot, before MQTT, and again right after. A Dee Fly Cube sends Azure IoT Hub's HTTPS poll for queued cloud-to-device messages (`GET /devices/<id>/messages/devicebound`), which the probe answers like the real hub with an empty queue (`204 No Content`). Without the probe, nothing answers and the box simply goes on with MQTT, so it is not needed for normal use. To see what your box sends:
-
-1. Set `HTTPS_PROBE_PORT: "8443"` in `docker-compose.yml` and restart the bridge (the log says `HTTPS probe listening on 0.0.0.0:8443`). The bridge runs as an unprivileged user, so it cannot listen on 443 itself.
-2. On the router, redirect the box's port 443 to it: a port forward from the box's IP, TCP, destination the Docker host, port 443 → the Docker host, port 8443 (on OPNsense: *Firewall → NAT → Port Forward*, with *Add associated filter rule*).
-3. Power-cycle the box and read the lines containing `probe:`: the server name the box asks for (SNI), then its HTTP request. Credentials are redacted.
-
-The probe answers `204 No Content` to that poll and `404 Not Found` to anything else, and never sends anything more. You can remove `HTTPS_PROBE_PORT` and the port forward once done.
-
 ### Troubleshooting
 
 | Symptom | Cause, fix |
@@ -338,7 +342,7 @@ The probe answers `204 No Content` to that poll and `404 Not Found` to anything 
 | No `NEW CONNECTION` in the logs | the box does not use your DNS rewrite, or cannot reach port 8883 of the host: check the DNS answer for `aldesiotsuite.azure-devices.net` and the firewall; power-cycle the box |
 | `REFUSED: not in DEVICE_IP` | the box's IP changed: reserve it in your DHCP server and update `DEVICE_IP` |
 | `WARNING: client_id != DEVICE_ID` | wrong `DEVICE_MAC` |
-| `box clock NOT SET` | normal for a few minutes after the box boots (it is checked again automatically); if it persists, NTP is blocked: see [Box clock (NTP)](#box-clock-ntp) |
+| `box clock NOT SET` | normal for a minute or two after the box boots (it is checked again automatically); if it persists, the box has no time source: see [Box clock](#box-clock) |
 | `Address already in use` at startup | another container (the old aldes-mqtt-bridge?) already listens on port 8883 |
 | *Dernière commande*: *Échec* | the box acknowledged but did not change mode; for holidays, check the clock |
 | Entities *unavailable* | box disconnected, or no frame for 30 min: check `docker compose logs` |

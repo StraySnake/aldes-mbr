@@ -63,7 +63,10 @@ services:
       # SENSOR_EXPIRE_AFTER: "1800"  # sensors unavailable after 30 min without telemetry (0 = never)
       # CMD_CONFIRM_TIMEOUT: "900"   # max wait for a frame confirming a mode change
       # CMD_QOS: "1"                 # 1 = commands acknowledged by the box (0 = legacy, not recommended)
-      # HTTPS_PROBE_PORT: "8443"     # diagnostic: log the box's HTTPS requests (README, "HTTPS probe")
+      # === Time for the box (README, "Box clock") ===
+      # Answer the box's HTTPS requests: it takes the time from them. Needs a port forward
+      # on the router: box -> this host, TCP 443 -> 8443.
+      # HTTPS_PORT: "8443"
       # CLOCK_RECHECK: "600"         # box clock not set: reconnect it to check again after 10 min (0 = never)
 
       LOG_FILE: "/logs/mitm.log"
