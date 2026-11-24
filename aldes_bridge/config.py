@@ -49,6 +49,9 @@ Env vars:
                          disconnected, so that it reconnects with a fresh token and its
                          clock is checked again (default: 600, doubled at each failed
                          check up to 1 h; 0 = never)
+  HTTPS_PROBE_PORT       diagnostic: also listen on this port and log the HTTPS requests the
+                         box sends to port 443 (forward 443 -> this port on the router;
+                         default: 0 = off)
   CLOCK_RECHECK_GRACE    seconds the box may take to come back after such a disconnection
                          before HA marks it offline (default: 900)
 """
@@ -121,6 +124,8 @@ CMD_QOS = _env_num("CMD_QOS", 1, minimum=0)
 CLOCK_RECHECK = _env_num("CLOCK_RECHECK", 600.0, cast=float, minimum=0)
 CLOCK_RECHECK_MAX = 3600.0
 CLOCK_RECHECK_GRACE = _env_num("CLOCK_RECHECK_GRACE", 900.0, cast=float, minimum=0)
+# Diagnostic listener for the box's connections to port 443 (see probe.py). 0 = off.
+HTTPS_PROBE_PORT = _env_num("HTTPS_PROBE_PORT", 0, minimum=0)
 if CMD_QOS > 1:
     sys.exit(f"FATAL: CMD_QOS must be 0 or 1, got {CMD_QOS}")
 

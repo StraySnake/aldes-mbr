@@ -310,6 +310,7 @@ Environment variables of the container (see [`docker-compose.yml.example`](docke
 | `TLS_CIPHERS` | `ALL:@SECLEVEL=0` | cipher suites offered to the box; the negotiated one is logged at each connection |
 | `CLOCK_RECHECK` | `600` | while the box's clock is not set, seconds before the bridge closes the connection to check it again (doubled at each failed check, up to 1 h; 0 = never) |
 | `CLOCK_RECHECK_GRACE` | `900` | seconds the box may take to reconnect after such a check before Home Assistant shows it offline |
+| `HTTPS_PROBE_PORT` | `0` (off) | diagnostic: also listen on this port and log the HTTPS requests the box sends to port 443 (see [HTTPS probe](#https-probe-diagnostic)) |
 | `CERT_DIR` | `/data` | where the self-signed certificate is stored |
 
 Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an explicit message.
@@ -319,6 +320,16 @@ Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an expl
 - **Docker image**: the bridge runs as the unprivileged user `aldes` (uid 1000). The entrypoint starts as root only to take ownership of `/data` and `/logs`, so a `data/` folder created by an older image keeps working. If that is refused (e.g. on a network share), it runs as root and logs a warning. You can also set `user:` in `docker-compose.yml`; the volumes must then be writable by that user.
 - **Health check**: the container is *healthy* while the bridge runs and Mosquitto is connected (`docker ps` shows it). An offline box does not make it unhealthy: Home Assistant's availability shows that.
 - **Network**: the example uses `network_mode: host`, so that the bridge sees the box's real IP (needed for `DEVICE_IP`).
+
+### HTTPS probe (diagnostic)
+
+Besides MQTT (port 8883), the box tries HTTPS connections to port 443 of `aldesiotsuite.azure-devices.net`, i.e. of the bridge's host: at boot, before MQTT, and again right after. Nothing answers there, and what it wants is not known yet. To find out:
+
+1. Set `HTTPS_PROBE_PORT: "8443"` in `docker-compose.yml` and restart the bridge (the log says `HTTPS probe listening on 0.0.0.0:8443`). The bridge runs as an unprivileged user, so it cannot listen on 443 itself.
+2. On the router, redirect the box's port 443 to it: a port forward from the box's IP, TCP, destination the Docker host, port 443 → the Docker host, port 8443 (on OPNsense: *Firewall → NAT → Port Forward*, with *Add associated filter rule*).
+3. Power-cycle the box and read the lines containing `probe:`: the server name the box asks for (SNI), then its HTTP request. Credentials are redacted.
+
+The probe answers `404 Not Found` with the current time in the `Date` header, and never sends anything else. Remove `HTTPS_PROBE_PORT` and the port forward once done.
 
 ### Troubleshooting
 

@@ -174,3 +174,46 @@ def test_ha_discovery_unchanged_by_log_level(start_bridge, mqtt_port):
     assert wait(lambda: rec.last("homeassistant/select/aldes_vmc_AABBCCDDEEFF/mode/config"))
     assert json.loads(rec.last("homeassistant/select/aldes_vmc_AABBCCDDEEFF/mode/config"))["name"] == "Débit de ventilation"
     rec.close()
+
+
+# ---------- HTTPS probe (diagnostic listener for the box's port 443 connections) ----------
+
+def _probe_request(port, request, server_name="aldesiotsuite.azure-devices.net"):
+    import socket
+    import ssl
+    c = ssl.create_default_context()
+    c.check_hostname = False
+    c.verify_mode = ssl.CERT_NONE
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
+        with c.wrap_socket(raw, server_hostname=server_name) as s:
+            s.sendall(request)
+            resp = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return resp
+                resp += chunk
+
+
+def test_https_probe_logs_request_and_answers_404(start_bridge):
+    port = free_port()
+    bridge = start_bridge({"HTTPS_PROBE_PORT": str(port)})
+    assert wait(lambda: f"HTTPS probe listening on 0.0.0.0:{port}" in bridge.log())
+    body = b'{"hello":"box"}'
+    resp = _probe_request(port, (
+        b"POST /devices/AABBCCDDEEFF_AIR/messages/events?api-version=2016-11-14 HTTP/1.1\r\n"
+        b"Host: aldesiotsuite.azure-devices.net\r\n"
+        b"Authorization: SharedAccessSignature sr=x&sig=SECRET123&se=1478918800\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body))
+    assert resp.startswith(b"HTTP/1.1 404")
+    assert b"\r\nDate: " in resp
+    assert wait(lambda: "probe: closed" in bridge.log())
+    log = bridge.log()
+    assert "server name (SNI) = 'aldesiotsuite.azure-devices.net'" in log
+    assert "POST /devices/AABBCCDDEEFF_AIR/messages/events?api-version=2016-11-14 HTTP/1.1" in log
+    assert '{"hello":"box"}' in log
+    assert "SECRET123" not in log and "sig=<redacted>" in log
+
+
+def test_https_probe_off_by_default(bridge):
+    assert "HTTPS probe" not in bridge.log()

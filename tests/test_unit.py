@@ -143,3 +143,22 @@ def test_box_clock_from_sas_token():
     assert not clock.is_clock_set(1478918800, now)      # boot date, Nov 2016
     assert clock.is_clock_set(now + 38790, now)          # set (expiry a few hours ahead)
     assert clock.is_clock_set(now - 3600, now)           # small offsets tolerated
+
+
+# ---------- HTTPS probe: SNI parsing ----------
+
+def test_parse_sni_from_a_real_client_hello():
+    import ssl
+    from aldes_bridge.probe import parse_sni
+    ctx = ssl.create_default_context()
+    obj = ctx.wrap_bio(ssl.MemoryBIO(), out := ssl.MemoryBIO(), server_hostname="aldesiotsuite.azure-devices.net")
+    with pytest.raises(ssl.SSLWantReadError):
+        obj.do_handshake()
+    assert parse_sni(out.read()) == "aldesiotsuite.azure-devices.net"
+
+
+def test_parse_sni_without_server_name_or_garbage():
+    from aldes_bridge.probe import parse_sni
+    assert parse_sni(b"") is None
+    assert parse_sni(b"GET / HTTP/1.1\r\n") is None
+    assert parse_sni(b"\x16\x03\x01\x00\x05\x01\x00") is None  # truncated
