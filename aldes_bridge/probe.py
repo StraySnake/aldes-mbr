@@ -4,9 +4,14 @@ At boot, and again after its MQTT connection, the box tries a TCP connection to 
 of aldesiotsuite.azure-devices.net (the same name as MQTT, so with the DNS rewrite: this
 host). Nothing answers there, and what it wants is not known. When HTTPS_PROBE_PORT is
 set, the bridge listens on that port and logs what the box sends: the server name of its
-TLS ClientHello (SNI), then the HTTP request (credentials redacted). It answers
-"404 Not Found" with the current time in the Date header, closes, and never sends
-anything else: it is only meant to find out what the box asks for.
+TLS ClientHello (SNI), then the HTTP request (credentials redacted), answers, closes,
+and never sends anything else.
+
+What the box asks for (Dee Fly Cube, observed): at boot, before and right after its MQTT
+connection, GET /devices/<id>/messages/devicebound?api-version=2016-02-03, Azure IoT Hub's
+HTTPS poll for queued cloud-to-device messages, without SNI. The probe answers it like the
+real hub does with an empty queue: "204 No Content". Anything else gets "404 Not Found".
+Both carry the current time in the Date header (it does not set the box's clock).
 
 The bridge runs as an unprivileged user, so it cannot listen on 443 itself: use
 e.g. HTTPS_PROBE_PORT=8443 and a port forward on the router (box -> this host, TCP 443
@@ -89,6 +94,16 @@ def _log_request(addr, data):
             + ("..." if len(body) > LOG_BODY else ""))
 
 
+# GET /devices/<id>/messages/devicebound?api-version=...
+C2D_POLL = re.compile(rb"GET /devices/[^/\s]+/messages/devicebound(\?\S*)? HTTP/1\.[01]\r\n")
+
+
+def _reply(sock, status):
+    sock.sendall((f"HTTP/1.1 {status}\r\n"
+                  f"Date: {formatdate(usegmt=True)}\r\n"
+                  "Content-Length: 0\r\nConnection: close\r\n\r\n").encode())
+
+
 def _handle(raw, addr, ctx):
     log(f"{addr} probe: NEW CONNECTION on the HTTPS probe port")
     sock = raw
@@ -107,10 +122,14 @@ def _handle(raw, addr, ctx):
             log(f"{addr} probe: plain connection (not TLS)")
         data = _read_request(sock)
         _log_request(addr, data)
-        if data.startswith((b"GET ", b"POST ", b"PUT ", b"HEAD ", b"PATCH ", b"DELETE ")):
-            sock.sendall(("HTTP/1.1 404 Not Found\r\n"
-                          f"Date: {formatdate(usegmt=True)}\r\n"
-                          "Content-Length: 0\r\nConnection: close\r\n\r\n").encode())
+        if C2D_POLL.match(data):
+            # Azure IoT Hub's HTTPS "receive cloud-to-device message": the box polls for
+            # commands queued while it was offline. Empty queue = 204, as the real hub does.
+            _reply(sock, "204 No Content")
+            log(f"{addr} probe: answered 204 No Content (no pending cloud-to-device message, "
+                f"as Azure IoT Hub does)")
+        elif data.startswith((b"GET ", b"POST ", b"PUT ", b"HEAD ", b"PATCH ", b"DELETE ")):
+            _reply(sock, "404 Not Found")
             log(f"{addr} probe: answered 404 (with the current time in the Date header)")
     except ssl.SSLError as e:
         log(f"{addr} probe: TLS error: {e}")

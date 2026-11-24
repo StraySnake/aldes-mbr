@@ -215,5 +215,23 @@ def test_https_probe_logs_request_and_answers_404(start_bridge):
     assert "SECRET123" not in log and "sig=<redacted>" in log
 
 
+def test_https_probe_answers_c2d_poll_with_204(start_bridge):
+    """What a real box sends at boot: Azure IoT Hub's HTTPS poll for cloud-to-device messages."""
+    port = free_port()
+    bridge = start_bridge({"HTTPS_PROBE_PORT": str(port)})
+    assert wait(lambda: "HTTPS probe listening" in bridge.log())
+    resp = _probe_request(port, (
+        b"GET /devices/AABBCCDDEEFF_AIR/messages/devicebound?api-version=2016-02-03 HTTP/1.1\r\n"
+        b"Host: aldesiotsuite.azure-devices.net\r\n"
+        b"Authorization: SharedAccessSignature sr=x&sig=SECRET123&se=1478918800\r\n"
+        b"Connection: keep-alive\r\n\r\n"), server_name=None)
+    assert resp.startswith(b"HTTP/1.1 204 No Content")
+    assert wait(lambda: "probe: closed" in bridge.log())
+    log = bridge.log()
+    assert "server name (SNI) = None" in log
+    assert "answered 204 No Content" in log
+    assert "SECRET123" not in log
+
+
 def test_https_probe_off_by_default(bridge):
     assert "HTTPS probe" not in bridge.log()

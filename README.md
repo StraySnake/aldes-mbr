@@ -323,13 +323,13 @@ Invalid values (e.g. `LOG_MAX_BYTES=5M`) stop the bridge at startup with an expl
 
 ### HTTPS probe (diagnostic)
 
-Besides MQTT (port 8883), the box tries HTTPS connections to port 443 of `aldesiotsuite.azure-devices.net`, i.e. of the bridge's host: at boot, before MQTT, and again right after. Nothing answers there, and what it wants is not known yet. To find out:
+Besides MQTT (port 8883), the box tries HTTPS connections to port 443 of `aldesiotsuite.azure-devices.net`, i.e. of the bridge's host: at boot, before MQTT, and again right after. A Dee Fly Cube sends Azure IoT Hub's HTTPS poll for queued cloud-to-device messages (`GET /devices/<id>/messages/devicebound`), which the probe answers like the real hub with an empty queue (`204 No Content`). Without the probe, nothing answers and the box simply goes on with MQTT, so it is not needed for normal use. To see what your box sends:
 
 1. Set `HTTPS_PROBE_PORT: "8443"` in `docker-compose.yml` and restart the bridge (the log says `HTTPS probe listening on 0.0.0.0:8443`). The bridge runs as an unprivileged user, so it cannot listen on 443 itself.
 2. On the router, redirect the box's port 443 to it: a port forward from the box's IP, TCP, destination the Docker host, port 443 → the Docker host, port 8443 (on OPNsense: *Firewall → NAT → Port Forward*, with *Add associated filter rule*).
 3. Power-cycle the box and read the lines containing `probe:`: the server name the box asks for (SNI), then its HTTP request. Credentials are redacted.
 
-The probe answers `404 Not Found` with the current time in the `Date` header, and never sends anything else. Remove `HTTPS_PROBE_PORT` and the port forward once done.
+The probe answers `204 No Content` to that poll and `404 Not Found` to anything else, and never sends anything more. You can remove `HTTPS_PROBE_PORT` and the port forward once done.
 
 ### Troubleshooting
 
