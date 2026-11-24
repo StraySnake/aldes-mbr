@@ -1,7 +1,9 @@
 """The Connect Box's clock, as seen from its SAS token.
 
-At every boot the box's clock restarts at a fixed date in November 2016; it is only set
-by NTP from a hard-coded address (61.164.36.105, UDP 123). Its time is not in the
+At every boot the box's clock restarts at a fixed date in November 2016 (2016-11-12 00:00
+UTC). It is set either by NTP, from a hard-coded address (61.164.36.105, UDP 123), which
+puts it at UTC+8, or by the Date header of the answers to its HTTPS requests (port 443),
+which puts it at UTC (see https.py). Its time is not in the
 telemetry, but at each connection it signs a SAS token whose expiry ("se=", Unix time)
 is computed from its own clock: still in 2016 means the clock is not set, and then
 holiday commands are acknowledged but never start.
@@ -15,8 +17,8 @@ _SE_RE = re.compile(r"(?:^|&)se=(\d+)")
 # One day of tolerance covers any time zone offset or token lifetime.
 _TOLERANCE = 24 * 3600
 
-NTP_HINT = ("it cannot reach its NTP server 61.164.36.105 (UDP 123): allow it or redirect it "
-            "to a local NTP server (README, 'Box clock (NTP)')")
+NTP_HINT = ("it has no time source: forward its HTTPS port 443 to the bridge (HTTPS_PORT), "
+            "or let it reach its NTP server 61.164.36.105 (UDP 123) (README, 'Box clock')")
 
 
 def parse_se(password_text):

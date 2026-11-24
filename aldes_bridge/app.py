@@ -9,6 +9,7 @@ from .tls import build_ssl_context, gen_cert
 from .box import handle_client, ip_allowed
 from .commands import cmd_callback, tracker
 from .upstream import UpstreamBridge
+from . import https
 from . import runtime
 
 
@@ -54,6 +55,7 @@ def main():
     log(f"log level {LOG_LEVEL}" + ("" if LOG_LEVEL == "debug" else
                                      " (set LOG_LEVEL=debug to log every telemetry frame)"))
     threading.Thread(target=_health_loop, daemon=True).start()
+    https.start()
     if ALLOWED_IPS:
         log(f"accepting connections only from {', '.join(sorted(ALLOWED_IPS))}")
     else:
