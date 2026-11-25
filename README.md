@@ -2,7 +2,15 @@
 
 > Local control of an Aldes ventilation unit (VMC / HRV) with a Connect Box, from Home Assistant, without the Aldes cloud.
 
-aldes-mbr is a fork of [djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge), released under the same [MIT license](LICENSE). It keeps the same idea — a fake Azure IoT Hub the box talks to — and adds command confirmation, a time source for the box, more Home Assistant entities, access control, and a test suite. See [Changes from aldes-mqtt-bridge](#changes-from-aldes-mqtt-bridge).
+aldes-mbr is a fork of [djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge), released under the same [MIT license](LICENSE). It keeps the same idea — a fake Azure IoT Hub the box talks to — and makes it reliable and complete:
+
+- **commands you can trust**: sent with QoS 1 (QoS 0 corrupted them) and confirmed in the next frame, with a resend and a status entity;
+- **the box always on time**: its clock is detected, re-checked, and can be set over HTTPS (no NTP, correct timezone) — so holidays and the schedule actually work;
+- **more in Home Assistant**: online/offline availability, and entities for the command result, the bypass, the filter, the box clock and more;
+- **safer and sturdier**: only the box's IP is accepted, telemetry merging and invalid-frame handling, an unprivileged container with a healthcheck;
+- **maintainable**: split into a package, with a test suite and CI.
+
+Full list: [Changes from aldes-mqtt-bridge](#changes-from-aldes-mqtt-bridge).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/ghcr.io-aldes--mbr-blue?logo=docker)](https://github.com/StraySnake/aldes-mbr/pkgs/container/aldes-mbr)
