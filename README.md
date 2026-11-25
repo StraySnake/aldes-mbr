@@ -2,7 +2,7 @@
 
 > Local control of an Aldes ventilation unit (VMC / HRV) with a Connect Box, from Home Assistant, without the Aldes cloud.
 
-aldes-mbr is a fork of [djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge), released under the same [MIT license](LICENSE).
+aldes-mbr is a fork of [djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge), released under the same [MIT license](LICENSE). It keeps the same idea — a fake Azure IoT Hub the box talks to — and adds command confirmation, a time source for the box, more Home Assistant entities, access control, and a test suite. See [Changes from aldes-mqtt-bridge](#changes-from-aldes-mqtt-bridge).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/ghcr.io-aldes--mbr-blue?logo=docker)](https://github.com/StraySnake/aldes-mbr/pkgs/container/aldes-mbr)
@@ -396,6 +396,53 @@ pytest
 ```
 
 The end-to-end tests start the bridge as a subprocess against [amqtt](https://github.com/Yakifo/amqtt) (a pure-Python MQTT broker standing in for Mosquitto) and fake Connect Boxes speaking MQTT over TLS, including the firmware's quirks. They run on Linux (one test connects from `127.0.0.2`). The CI runs them on every pull request, along with a Docker build and startup check.
+
+## Changes from aldes-mqtt-bridge
+
+aldes-mbr started from [djo1338/aldes-mqtt-bridge](https://github.com/djo1338/aldes-mqtt-bridge) (a single `fake_iothub.py`) and builds on it. The base idea is unchanged; what follows is what this fork adds and fixes.
+
+### Command reliability
+
+- **Commands are sent with QoS 1 and a real packet id.** The firmware reads a packet id in *every* PUBLISH it receives, even QoS 0 ones: with QoS 0 (the original behaviour) it takes the first 2 bytes of the payload as the id and parses a corrupted command. QoS 1 fixes that, and the box's PUBACK becomes a real receipt (*Reçue par la box*).
+- **Command confirmation.** For a mode change, the bridge checks the next telemetry frame, resends once if the box did not switch, then reports failure. The outcome is a sensor (*Dernière commande*): *En attente, Reçue par la box, Confirmée, Renvoyée, Échec, …*
+- **Holiday cancel that works.** The app's cancel (an epoch date range) is ignored by a real Dee Fly Cube; `vacances_stop` switches back to the previous profile instead.
+- **TLS I/O is confined to each connection's own thread** (commands are queued to it), which avoids using one OpenSSL socket from two threads at once.
+
+### Time for the box (new)
+
+- The box's clock restarts in 2016 at every boot. The bridge **detects** whether it is set (from the SAS token) and exposes it (*Horloge de la box*); it **refuses holidays** while it is unset, instead of letting them fail silently.
+- It **re-checks** an unset clock by forcing a short reconnection, so the box does not stay stuck for days.
+- It can **give the box the time over HTTPS** (`HTTPS_PORT`): UTC, and with no NTP at all. See [Box clock](#box-clock).
+
+### Home Assistant
+
+- New entities: *Dernière commande*, *Dernière mise à jour*, *Horloge de la box*, *By-pass ouvert*, *Filtre à changer*, *Filtre (durée de vie restante)*, *Début / Fin des vacances*, fan-command sensors.
+- **Online/offline availability** (MQTT LWT) and an *unavailable after N minutes without a frame* timeout, so a disconnected box shows as unavailable rather than frozen.
+- The *Débit de ventilation* select is kept separate from the comfort mode, which the box cannot set (documented, with the research behind it).
+- Several raw fields are now named and typed; unknown ones are disabled by default.
+
+### Robustness
+
+- **Telemetry merge:** the short boot heartbeat no longer blanks every sensor; each frame is merged into the last values, seeded from Mosquitto's retained copy after a restart.
+- **Truncated/again-mode frames are ignored** (`…,+++}`, `AT+ENTM`) instead of replacing the telemetry.
+- A second CONNECT, a stale half-open session and oversized packets are handled.
+
+### Security
+
+- **`DEVICE_IP`**: only the box's IP is accepted.
+- Only the box's own session, on its own topics, is relayed to Mosquitto — another LAN device cannot inject values into Home Assistant.
+
+### Operations
+
+- The container **runs as an unprivileged user** (the original ran as root), with a Docker **healthcheck**.
+- **Log levels** (`info`/`debug`/`warning`) and **log rotation**; clear startup errors on invalid settings.
+- **Firmware:** the box's version check is answered so no Aldes update can silently break the bridge, and that answer also carries the time. See [Firmware updates](#firmware-updates).
+
+### Code and documentation
+
+- Split from one file into the `aldes_bridge` package (see [ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+- A **test suite** (end-to-end against a real broker and fake boxes, plus unit tests) and **CI** on every pull request.
+- The mode flows are the ones measured here (105 / 195 / 210 m³/h, Invités time-limited), noted as installer-configured; the unverified "X/Y inverted" claim is dropped. [PROTOCOL.md](docs/PROTOCOL.md) is expanded (time sources, firmware, bypass/comfort research).
 
 ## Documentation
 
