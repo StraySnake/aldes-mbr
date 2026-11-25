@@ -122,6 +122,10 @@ The first lines of the log (`HA discovery: …`) show which version runs.
 
 Everything is published through MQTT discovery under one device, "Aldes VMC" (`DEVICE_NAME`). The typical values come from a Dee Fly Cube, at about 23 °C inside and 10 °C outside.
 
+| Measurements | Controls | Diagnostics |
+|---|---|---|
+| ![Sensors in Home Assistant](docs/images/ha-sensors.png) | ![Controls in Home Assistant](docs/images/ha-controls.png) | ![Diagnostics in Home Assistant](docs/images/ha-diagnostic.png) |
+
 ### Measurements
 
 | Entity | Telemetry field | Unit | Meaning, typical values |
